@@ -1,3 +1,11 @@
 # Zig build artifacts
 .zig-cache/
 zig-out/
+
+# ESPHome build artifacts
+esphome/secrets.yaml
+esphome/.esphome/
+esphome/.pioenvs/
+esphome/.piolibdeps/
+esphome/*.bin
+esphome/*.elf

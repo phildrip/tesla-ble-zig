@@ -1,0 +1,78 @@
+substitutions:
+  friendly_name: Tesla BLE NanoC6
+  device_name: tesla-ble-nanoc6
+  device_description: Tesla BLE M5Stack NanoC6
+  charging_amps_max: "32"
+
+  board: esp32-c6-devkitm-1
+  variant: esp32c6
+  flash_size: 4MB
+
+  ble_mac_address: !secret ble_mac_address
+  tesla_vin: !secret tesla_vin
+
+esphome:
+  includes:
+    - /tmp/tesla_zig_glue.h
+  platformio_options:
+    build_flags:
+      - "-I/tmp"
+      - "-L/tmp"
+      - "-ltesla_ble_zig_riscv32"
+  on_boot:
+    priority: -10
+    then:
+      - lambda: |-
+          test_zig_library();
+      - delay: 15s
+      - component.update: esphome_tesla_ble_ip_address
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+captive_portal:
+
+packages:
+  remote_package_files:
+    url: https://github.com/PedroKTFC/esphome-tesla-ble/
+    files:
+      - packages/base.yml
+      - packages/common.yml
+      - packages/project.yml
+      - packages/client.yml
+
+light:
+  - platform: status_led
+    name: "Status LED"
+    entity_category: diagnostic
+    pin: GPIO7
+
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    pin: GPIO20
+    num_leds: 4
+    chipset: ws2812
+    name: "RGB LED"
+    entity_category: diagnostic
+    power_supply: rgbpwr
+
+power_supply:
+  - id: "rgbpwr"
+    enable_on_boot: true
+    pin: GPIO19
+    enable_time: 10ms
+    keep_on_time: 10ms
+
+binary_sensor:
+  - platform: gpio
+    name: Button
+    entity_category: diagnostic
+    pin:
+      number: GPIO9
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_off: 10ms
