@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try tesla_ble_zig.printAnotherMessage(stdout_writer);
+    _ = try stdout_writer.write("Tesla BLE Zig Control Protocol Library\n");
 
     try stdout_writer.flush(); // Don't forget to flush!
 }
