@@ -87,6 +87,53 @@ pub const Client = struct {
         return try insertLength(payload_len, output);
     }
 
+    /// Build a signed and encrypted vehicle security action payload (such as Lock, Unlock, or Wake).
+    pub fn buildRkeActionMessage(
+        self: *Client,
+        random: std.Random,
+        current_timestamp: u32,
+        action: u32,
+        output: []u8,
+    ) !usize {
+        var payload_buf: [32]u8 = undefined;
+        var writer = protobuf.Writer.init(&payload_buf);
+        try protobuf.UnsignedMessage.encodeRkeAction(action, &writer);
+        const payload_slice = payload_buf[0..writer.pos];
+
+        return try self.buildUniversalMessageWithPayload(
+            random,
+            current_timestamp,
+            payload_slice,
+            .vehicle_security,
+            true,
+            output,
+        );
+    }
+
+    /// Build a signed and encrypted closure move request payload (such as trunk or frunk).
+    pub fn buildClosureMoveRequestMessage(
+        self: *Client,
+        random: std.Random,
+        current_timestamp: u32,
+        rear_trunk_action: u32,
+        front_trunk_action: u32,
+        output: []u8,
+    ) !usize {
+        var payload_buf: [64]u8 = undefined;
+        var writer = protobuf.Writer.init(&payload_buf);
+        try protobuf.UnsignedMessage.encodeClosureMoveRequest(rear_trunk_action, front_trunk_action, &writer);
+        const payload_slice = payload_buf[0..writer.pos];
+
+        return try self.buildUniversalMessageWithPayload(
+            random,
+            current_timestamp,
+            payload_slice,
+            .vehicle_security,
+            true,
+            output,
+        );
+    }
+
     /// Build a completely framed, signed, and encrypted/unsigned universal command payload.
     pub fn buildUniversalMessageWithPayload(
         self: *Client,

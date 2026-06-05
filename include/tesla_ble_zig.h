@@ -164,6 +164,96 @@ int32_t tesla_client_build_universal_message(
 );
 
 /**
+ * @brief Build a signed and encrypted Lock command BLE packet.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ * @param out_buffer Output buffer to write the ready-to-transmit BLE packet to.
+ * @param out_buffer_len Capacity of the output buffer.
+ * @param out_written_len Pointer to receive the actual written size.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_build_lock_command(
+    void *client_ptr,
+    uint32_t current_timestamp,
+    uint8_t *out_buffer,
+    size_t out_buffer_len,
+    size_t *out_written_len
+);
+
+/**
+ * @brief Build a signed and encrypted Unlock command BLE packet.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ * @param out_buffer Output buffer to write the ready-to-transmit BLE packet to.
+ * @param out_buffer_len Capacity of the output buffer.
+ * @param out_written_len Pointer to receive the actual written size.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_build_unlock_command(
+    void *client_ptr,
+    uint32_t current_timestamp,
+    uint8_t *out_buffer,
+    size_t out_buffer_len,
+    size_t *out_written_len
+);
+
+/**
+ * @brief Build a signed and encrypted Wake command BLE packet.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ * @param out_buffer Output buffer to write the ready-to-transmit BLE packet to.
+ * @param out_buffer_len Capacity of the output buffer.
+ * @param out_written_len Pointer to receive the actual written size.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_build_wake_command(
+    void *client_ptr,
+    uint32_t current_timestamp,
+    uint8_t *out_buffer,
+    size_t out_buffer_len,
+    size_t *out_written_len
+);
+
+/**
+ * @brief Build a signed and encrypted Rear Trunk action command BLE packet.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ * @param out_buffer Output buffer to write the ready-to-transmit BLE packet to.
+ * @param out_buffer_len Capacity of the output buffer.
+ * @param out_written_len Pointer to receive the actual written size.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_build_trunk_command(
+    void *client_ptr,
+    uint32_t current_timestamp,
+    uint8_t *out_buffer,
+    size_t out_buffer_len,
+    size_t *out_written_len
+);
+
+/**
+ * @brief Build a signed and encrypted Front Trunk (Frunk) action command BLE packet.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ * @param out_buffer Output buffer to write the ready-to-transmit BLE packet to.
+ * @param out_buffer_len Capacity of the output buffer.
+ * @param out_written_len Pointer to receive the actual written size.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_build_frunk_command(
+    void *client_ptr,
+    uint32_t current_timestamp,
+    uint8_t *out_buffer,
+    size_t out_buffer_len,
+    size_t *out_written_len
+);
+
+/**
  * @brief Decrypt an authenticated vehicle response payload using session parameters.
  * 
  * @param client_ptr Pointer to the initialized Client.

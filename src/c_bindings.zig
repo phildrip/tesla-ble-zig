@@ -198,6 +198,123 @@ export fn tesla_client_build_universal_message(
     return @intFromEnum(ErrorCode.OK);
 }
 
+/// Build a signed and encrypted Lock command BLE packet.
+export fn tesla_client_build_lock_command(
+    client_ptr: ?*anyopaque,
+    current_timestamp: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const r = TeslaRandom.random();
+
+    const len = c.buildRkeActionMessage(r, current_timestamp, 1, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
+/// Build a signed and encrypted Unlock command BLE packet.
+export fn tesla_client_build_unlock_command(
+    client_ptr: ?*anyopaque,
+    current_timestamp: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const r = TeslaRandom.random();
+
+    const len = c.buildRkeActionMessage(r, current_timestamp, 0, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
+/// Build a signed and encrypted Wake command BLE packet.
+export fn tesla_client_build_wake_command(
+    client_ptr: ?*anyopaque,
+    current_timestamp: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const r = TeslaRandom.random();
+
+    const len = c.buildRkeActionMessage(r, current_timestamp, 30, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
+/// Build a signed and encrypted Rear Trunk action command BLE packet.
+export fn tesla_client_build_trunk_command(
+    client_ptr: ?*anyopaque,
+    current_timestamp: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const r = TeslaRandom.random();
+
+    // rear trunk move = 1, front trunk = 0
+    const len = c.buildClosureMoveRequestMessage(r, current_timestamp, 1, 0, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
+/// Build a signed and encrypted Front Trunk (Frunk) action command BLE packet.
+export fn tesla_client_build_frunk_command(
+    client_ptr: ?*anyopaque,
+    current_timestamp: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const r = TeslaRandom.random();
+
+    // rear trunk move = 0, front trunk = 1
+    const len = c.buildClosureMoveRequestMessage(r, current_timestamp, 0, 1, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
 /// Decrypt an authenticated vehicle response payload using session parameters.
 export fn tesla_client_decrypt_response(
     client_ptr: ?*anyopaque,

@@ -76,6 +76,116 @@ int main() {
     std::cout << "[Integration Test] Written BLE handshake packet size: " << out_written << " bytes" << std::endl;
     assert(out_written > 0);
 
+    // 8. Verify command building fails before session is initialized
+    rc = tesla_client_build_lock_command(
+        client_buffer.data(),
+        1000,
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_lock_command before handshake returned: " << rc << std::endl;
+    assert(rc == TESLA_ERROR_SESSION_NOT_INITIALIZED);
+
+    // 9. Initialize the session by feeding a mock SessionInfo Response
+    // We serialize a basic SessionInfo payload using manual protobuf encoding:
+    // field 1 (counter) = 1 (tag 1<<3 | 0 = 0x08, value = 0x01)
+    // field 2 (publicKey) = 65 bytes (tag 2<<3 | 2 = 0x12, length = 65, followed by 65 bytes of public key)
+    // field 3 (epoch) = 16 bytes (tag 3<<3 | 2 = 0x1a, length = 16, followed by 16 bytes of epoch)
+    // field 4 (clock_time) = 1000 (tag 4<<3 | 5 = 0x25, value = 1000 in little-endian fixed32 -> 0xe8 0x03 0x00 0x00)
+    // field 5 (status) = 0 (tag 5<<3 | 0 = 0x28, value = 0x00)
+    std::vector<uint8_t> mock_session_info;
+    
+    mock_session_info.push_back(0x08);
+    mock_session_info.push_back(0x01);
+
+    mock_session_info.push_back(0x12);
+    mock_session_info.push_back(65);
+    for (int i = 0; i < 65; ++i) {
+        mock_session_info.push_back(pub_key[i]);
+    }
+
+    mock_session_info.push_back(0x1a);
+    mock_session_info.push_back(16);
+    for (int i = 0; i < 16; ++i) {
+        mock_session_info.push_back(0xde);
+    }
+
+    mock_session_info.push_back(0x25);
+    mock_session_info.push_back(0xe8);
+    mock_session_info.push_back(0x03);
+    mock_session_info.push_back(0x00);
+    mock_session_info.push_back(0x00);
+
+    mock_session_info.push_back(0x28);
+    mock_session_info.push_back(0x00);
+
+    rc = tesla_client_handle_session_info_response(
+        client_buffer.data(),
+        TESLA_DOMAIN_VEHICLE_SECURITY,
+        1000, // current_timestamp
+        mock_session_info.data(),
+        mock_session_info.size()
+    );
+    std::cout << "[Integration Test] tesla_client_handle_session_info_response returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+
+    // 10. Verify command building works after session is initialized
+    rc = tesla_client_build_lock_command(
+        client_buffer.data(),
+        1005, // current_timestamp
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_lock_command returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+    assert(out_written > 0);
+
+    rc = tesla_client_build_unlock_command(
+        client_buffer.data(),
+        1006,
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_unlock_command returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+    assert(out_written > 0);
+
+    rc = tesla_client_build_wake_command(
+        client_buffer.data(),
+        1007,
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_wake_command returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+    assert(out_written > 0);
+
+    rc = tesla_client_build_trunk_command(
+        client_buffer.data(),
+        1008,
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_trunk_command returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+    assert(out_written > 0);
+
+    rc = tesla_client_build_frunk_command(
+        client_buffer.data(),
+        1009,
+        out_buf,
+        sizeof(out_buf),
+        &out_written
+    );
+    std::cout << "[Integration Test] tesla_client_build_frunk_command returned: " << rc << std::endl;
+    assert(rc == TESLA_OK);
+    assert(out_written > 0);
+
     std::cout << "[Integration Test] SUCCESS! Zig static library successfully integrated, linked, and executed from C++!" << std::endl;
     return 0;
 }

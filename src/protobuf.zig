@@ -384,6 +384,26 @@ pub const DecodedRoutableMessage = struct {
     }
 };
 
+pub const UnsignedMessage = struct {
+    pub fn encodeRkeAction(action: u32, outer: *Writer) !void {
+        // Message is UnsignedMessage, field 2 is RKEAction (enum)
+        try outer.writeUint32(2, action);
+    }
+
+    pub fn encodeClosureMoveRequest(rear_trunk_action: u32, front_trunk_action: u32, outer: *Writer) !void {
+        var temp_buf: [64]u8 = undefined;
+        var inner = Writer.init(&temp_buf);
+        if (rear_trunk_action != 0) {
+            try inner.writeUint32(5, rear_trunk_action);
+        }
+        if (front_trunk_action != 0) {
+            try inner.writeUint32(6, front_trunk_action);
+        }
+        // UnsignedMessage field 4 is closureMoveRequest
+        try outer.writeLengthDelimited(4, inner.buffer[0..inner.pos]);
+    }
+};
+
 test "Protobuf writing and reading pipeline" {
     var buffer: [512]u8 = undefined;
     var writer = Writer.init(&buffer);
@@ -418,3 +438,31 @@ test "Protobuf writing and reading pipeline" {
     try std.testing.expectEqualSlices(u8, &mock_uuid, decoded.uuid[0..decoded.uuid_len]);
     try std.testing.expectEqual(@as(u32, 2), decoded.flags);
 }
+
+test "UnsignedMessage Serialization" {
+    var buffer: [128]u8 = undefined;
+
+    // Test RKE Action Lock serialization
+    {
+        var writer = Writer.init(&buffer);
+        try UnsignedMessage.encodeRkeAction(1, &writer);
+        const written = buffer[0..writer.pos];
+        // Expect tag 2 (field_number=2, wire_type=0) -> (2<<3)|0 = 16 (0x10)
+        // Expect value 1 -> 1
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x01 }, written);
+    }
+
+    // Test Closure Move Request (rear trunk = 1, front trunk = 1)
+    {
+        var writer = Writer.init(&buffer);
+        try UnsignedMessage.encodeClosureMoveRequest(1, 1, &writer);
+        const written = buffer[0..writer.pos];
+        // Expect tag 4 (field_number=4, wire_type=2) -> (4<<3)|2 = 34 (0x22)
+        // Inside length-delimited sub-message:
+        // rearTrunk (field 5, wire_type 0) -> (5<<3)|0 = 40 (0x28) with value 1
+        // frontTrunk (field 6, wire_type 0) -> (6<<3)|0 = 48 (0x30) with value 1
+        // Length of sub-message = 4 bytes: [0x28, 0x01, 0x30, 0x01]
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x22, 0x04, 0x28, 0x01, 0x30, 0x01 }, written);
+    }
+}
+
