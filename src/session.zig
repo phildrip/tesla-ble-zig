@@ -457,3 +457,54 @@ test "Session AD and Cryptographic pipeline" {
         try std.testing.expectEqualSlices(u8, response_plaintext, &resp_decrypted);
     }
 }
+
+test "Session edge cases and error handling" {
+    // 1. Session.init with a VIN that is too long
+    const too_long_vin = "A" ** 33;
+    try std.testing.expectError(error.VinTooLong, Session.init(.vehicle_security, too_long_vin));
+
+    // 2. Methods on uninitialized sessions
+    var uninit_sess = try Session.init(.vehicle_security, "12345");
+    try std.testing.expect(!uninit_sess.is_valid);
+
+    var dummy_ciphertext: [10]u8 = undefined;
+    var dummy_tag: [16]u8 = undefined;
+    var dummy_nonce: [12]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(42);
+
+    const encrypt_res = uninit_sess.encryptCommand(
+        prng.random(),
+        "hello",
+        100,
+        0,
+        &dummy_ciphertext,
+        &dummy_tag,
+        &dummy_nonce,
+    );
+    try std.testing.expectError(error.SessionNotInitialized, encrypt_res);
+
+    var dummy_plaintext: [10]u8 = undefined;
+    const decrypt_res = uninit_sess.decryptResponse(
+        &dummy_ciphertext,
+        dummy_tag,
+        dummy_nonce,
+        "dummy_hash",
+        0,
+        0,
+        &dummy_plaintext,
+    );
+    try std.testing.expectError(error.SessionNotInitialized, decrypt_res);
+
+    // 3. constructRequestHash buffer too small
+    var small_hash_buf: [5]u8 = undefined;
+    const hash_res = Session.constructRequestHash(.aes_gcm_personalized, &dummy_tag, .vehicle_security, &small_hash_buf);
+    try std.testing.expectError(error.BufferTooSmall, hash_res);
+
+    // 4. constructAdBuffer buffer too small
+    var init_sess = try Session.init(.vehicle_security, "12345");
+    init_sess.is_valid = true;
+    var small_ad_buf: [10]u8 = undefined;
+    const ad_res = init_sess.constructAdBuffer(.aes_gcm_personalized, 100, 0, null, 0, &small_ad_buf);
+    try std.testing.expectError(error.BufferTooSmall, ad_res);
+}
+

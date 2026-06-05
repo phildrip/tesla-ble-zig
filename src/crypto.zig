@@ -131,3 +131,12 @@ test "comprehensive crypto library test" {
 
     try std.testing.expectEqualSlices(u8, msg, &decrypted);
 }
+
+test "crypto edge cases and error handling" {
+    // Passing an invalid vehicle public key to computeSharedSecret should fail cleanly
+    const private_key = [_]u8{1} ** 32;
+    const invalid_public_key = [_]u8{0} ** 65;
+    const res = computeSharedSecret(private_key, invalid_public_key);
+    try std.testing.expectError(error.InvalidEncoding, res);
+}
+
