@@ -57,38 +57,6 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
-    const exe = b.addExecutable(.{
-        .name = "tesla_ble_zig",
-        .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
-            .target = target,
-            .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                // Here "tesla_ble_zig" is the name you will use in your source code to
-                // import this module (e.g. `@import("tesla_ble_zig")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
-                .{ .name = "tesla_ble_zig", .module = mod },
-            },
-        }),
-    });
-
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
-
     const lib = b.addLibrary(.{
         .name = "tesla_ble_zig",
         .linkage = .static,
@@ -99,6 +67,39 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(lib);
+
+    if (target.result.os.tag != .freestanding) {
+        const exe = b.addExecutable(.{
+            .name = "tesla_ble_zig",
+            .root_module = b.createModule(.{
+                // b.createModule defines a new module just like b.addModule but,
+                // unlike b.addModule, it does not expose the module to consumers of
+                // this package, which is why in this case we don't have to give it a name.
+                .root_source_file = b.path("src/main.zig"),
+                // Target and optimization levels must be explicitly wired in when
+                // defining an executable or library (in the root module), and you
+                // can also hardcode a specific target for an executable or library
+                // definition if desireable (e.g. firmware for embedded devices).
+                .target = target,
+                .optimize = optimize,
+                // List of modules available for import in source files part of the
+                // root module.
+                .imports = &.{
+                    // Here "tesla_ble_zig" is the name you will use in your source code to
+                    // import this module (e.g. `@import("tesla_ble_zig")`). The name is
+                    // repeated because you are allowed to rename your imports, which
+                    // can be extremely useful in case of collisions (which can happen
+                    // importing modules from different packages).
+                    .{ .name = "tesla_ble_zig", .module = mod },
+                },
+            }),
+        });
+
+        // This declares intent for the executable to be installed into the
+        // install prefix when running `zig build` (i.e. when executing the default
+        // step). By default the install prefix is `zig-out/` but can be overridden
+        // by passing `--prefix` or `-p`.
+        b.installArtifact(exe);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -164,4 +165,5 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+    }
 }

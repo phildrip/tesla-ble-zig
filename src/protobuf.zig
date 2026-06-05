@@ -73,7 +73,8 @@ pub const Reader = struct {
         return b;
     }
 
-    pub fn readBytes(self: *Reader, len: usize) ![]const u8 {
+    pub fn readBytes(self: *Reader, len_u64: u64) ![]const u8 {
+        const len = std.math.cast(usize, len_u64) orelse return error.EndOfStream;
         if (self.pos + len > self.buffer.len) return error.EndOfStream;
         const slice = self.buffer[self.pos .. self.pos + len];
         self.pos += len;
