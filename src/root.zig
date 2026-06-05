@@ -4,6 +4,8 @@ const std = @import("std");
 pub const protocol = @import("protocol.zig");
 pub const crypto = @import("crypto.zig");
 pub const session = @import("session.zig");
+pub const protobuf = @import("protobuf.zig");
+pub const client = @import("client.zig");
 
 test {
     // Reference tests to ensure they are built and executed by the build runner
