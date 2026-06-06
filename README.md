@@ -1,6 +1,6 @@
 # 🚗 Tesla BLE Zig Monorepo
 
-[![Zig Version](https://img.shields.io/badge/Zig-0.12%20%2F%200.13-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![Zig Version](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 [![ESPHome](https://img.shields.io/badge/ESPHome-Integrated-4caf50?logo=homeassistant&logoColor=white)](https://esphome.io/)
 [![Target](https://img.shields.io/badge/Target-ESP32--C6%20(RISC--V)-000000?logo=espressif&logoColor=white)](https://www.espressif.com/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -48,7 +48,7 @@ tesla-ble-zig/
 
 ## 🛠️ Prerequisites
 
-* **Zig Compiler**: Version `0.12.0` or `0.13.0`.
+* **Zig Compiler**: Version `0.16.0`.
 * **ESPHome Environment**: ESPHome installed locally or running on a target compiler machine (such as a Home Assistant server).
 * **Hardware**: An ESP32-C6 board (e.g., M5Stack NanoC6, ESP32-C6-DevKitM-1).
 
