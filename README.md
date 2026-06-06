@@ -90,10 +90,10 @@ make build-riscv
 
 ## 🚀 Deploying & Flashing via ESPHome
 
-This project features a fully-automated remote toolchain. If your ESPHome compile/flash machine is separate (e.g. Home Assistant or a local build server), the `Makefile` handles cross-compiling, copying files over SSH, compiling the ESPHome target, and uploading via raw USB on the remote machine.
+For most users, you will compile and flash your ESP32-C6 on the same local development machine it is plugged into via USB.
 
 ### Step 1: Set Up Credentials
-Under `esphome/`, copy the example file:
+Under `esphome/`, copy the secrets template:
 ```bash
 cp esphome/secrets.yaml.example esphome/secrets.yaml
 ```
@@ -105,41 +105,58 @@ Edit `esphome/secrets.yaml` to specify your:
 > [!WARNING]
 > `esphome/secrets.yaml` is hard-ignored in `.gitignore`. Never commit or publish your actual secrets, VIN, or private tokens to GitHub.
 
-### Step 2: Configure Makefile Variables
-At the top of the `Makefile`, adjust host configurations:
-```makefile
-REMOTE_HOST = 192.168.1.211            # Remote compiler machine IP/hostname
-REMOTE_DIR = /tmp/esphome-tesla-ble   # Project directory on remote host
-REMOTE_VENV = /tmp/esphome-venv/bin/esphome # Path to ESPHome executable
-REMOTE_PORT = /dev/ttyACM0             # ESP32-C6 USB device path
+### Step 2: Copy Build Outputs locally
+First, compile the static library for your ESP32-C6:
+```bash
+make build-riscv
+```
+Then, copy the compiled library and relevant headers into your local `/tmp` folder (which matches the include path defined in `tesla-ble-nanoc6.yml`):
+```bash
+cp zig-out/lib/libtesla_ble_zig.a /tmp/libtesla_ble_zig_riscv32.a
+cp esphome/tesla_zig_glue.h /tmp/tesla_zig_glue.h
+cp include/tesla_ble_zig.h /tmp/tesla_ble_zig.h
 ```
 
-### Step 3: Run Automation Pipeline
-To compile the library locally, deploy headers, and trigger the remote ESPHome build:
+### Step 3: Compile and Flash Locally
+Connect your ESP32-C6 via USB to your local machine, then run ESPHome to compile and upload the firmware:
+```bash
+# Compile and flash to the connected ESP32-C6
+esphome run esphome/tesla-ble-nanoc6.yml
+```
 
-1. **Deploy & Cross-Compile Library**:
+---
+
+### 🌐 Advanced: Remote Build & Deploy Server (Optional)
+If your ESP32-C6 is physically plugged into a separate machine (such as a Home Assistant server, Raspberry Pi, or a remote compiler host), the provided `Makefile` automates compiling locally, copying assets over the network, and triggering builds/flashing remotely:
+
+1. **Configure Target Host** at the top of the `Makefile`:
+   ```makefile
+   REMOTE_HOST = 192.168.1.211            # Remote compiler machine IP/hostname
+   REMOTE_DIR = /tmp/esphome-tesla-ble   # Project directory on remote host
+   REMOTE_VENV = /tmp/esphome-venv/bin/esphome # Path to ESPHome executable
+   REMOTE_PORT = /dev/ttyACM0             # ESP32-C6 USB device path
+   ```
+
+2. **Deploy Built Library over SSH**:
    ```bash
    make deploy-lib
    ```
-   *This builds the RISC-V soft-float library and uses `scp` to send `libtesla_ble_zig_riscv32.a`, `tesla_zig_glue.h`, and `tesla_ble_zig.h` to the target machine `/tmp`.*
+   *Compiles the RISC-V library and copies headers to `/tmp` on the target remote host.*
 
-2. **Compile ESPHome Firmware**:
+3. **Compile remotely**:
    ```bash
    make compile-esphome
    ```
-   *Connects via SSH to compile the firmware on the remote host linking the deployed library.*
 
-3. **Flash to ESP32-C6 via USB**:
+4. **Flash remote device over USB**:
    ```bash
    make flash-esphome
    ```
-   *Flashes the generated bin file over SSH to the physical ESP32-C6 device.*
 
-4. **Watch Real-time Logs**:
+5. **Stream logs over SSH**:
    ```bash
    make logs-esphome
    ```
-   *Streams real-time serial terminal prints from the ESP32-C6 console.*
 
 ---
 
