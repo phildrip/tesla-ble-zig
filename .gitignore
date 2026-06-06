@@ -9,3 +9,5 @@ esphome/.pioenvs/
 esphome/.piolibdeps/
 esphome/*.bin
 esphome/*.elf
+esphome/*.a
+*.a
