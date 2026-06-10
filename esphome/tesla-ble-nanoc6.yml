@@ -34,10 +34,10 @@ api:
 captive_portal:
 
 tesla_ble_vehicle:
-  update_interval: 600s
+  update_interval: 10s
   poll_asleep_period: 0
-  poll_data_period: 600
-  poll_charging_period: 600
+  poll_data_period: 30s
+  poll_charging_period: 30s
 
 packages:
   remote_package_files:
