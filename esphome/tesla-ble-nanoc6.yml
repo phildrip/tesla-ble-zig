@@ -33,6 +33,12 @@ api:
 
 captive_portal:
 
+tesla_ble_vehicle:
+  update_interval: 600s
+  poll_asleep_period: 0
+  poll_data_period: 600
+  poll_charging_period: 600
+
 packages:
   remote_package_files:
     url: https://github.com/PedroKTFC/esphome-tesla-ble/
