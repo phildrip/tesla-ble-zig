@@ -31,6 +31,7 @@ namespace esphome
     TeslaBLEVehicle::TeslaBLEVehicle() : tesla_ble_client_(new TeslaBLE::Client{})
     {
       ESP_LOGCONFIG(TAG, "Constructing Tesla BLE Vehicle component");
+      this->zig_client_ = malloc(tesla_client_size());
     }
 
     void TeslaBLEVehicle::setup()
@@ -46,6 +47,22 @@ namespace esphome
       this->openNVSHandle();
       this->initializePrivateKey();
       this->loadSessionInfo();
+
+      if (this->zig_client_ != nullptr) {
+        uint8_t dummy_conn_id[16] = {0};
+        int32_t rc = tesla_client_init(
+            this->zig_client_,
+            reinterpret_cast<const uint8_t*>(this->vin_.c_str()),
+            this->vin_.length(),
+            nullptr, // NULL private key since CSM doesn't need it at this step
+            dummy_conn_id
+        );
+        if (rc == 0) {
+          ESP_LOGI(TAG, "Zig Client initialized successfully with VIN %s!", this->vin_.c_str());
+        } else {
+          ESP_LOGE(TAG, "Failed to initialize Zig Client: %d", (int)rc);
+        }
+      }
     }
 
     void TeslaBLEVehicle::initializeFlash()
@@ -908,6 +925,35 @@ namespace esphome
 
     void TeslaBLEVehicle::loop()
     {
+      if (this->zig_client_ != nullptr) {
+        uint8_t current_state = tesla_client_get_csm_state(this->zig_client_);
+        if (current_state != this->prev_zig_csm_state_) {
+          const char *from_str = "UNKNOWN";
+          switch (this->prev_zig_csm_state_) {
+            case TESLA_CSM_STATE_DISCONNECTED: from_str = "DISCONNECTED"; break;
+            case TESLA_CSM_STATE_CONNECTING: from_str = "CONNECTING"; break;
+            case TESLA_CSM_STATE_HANDSHAKING_VCSEC: from_str = "HANDSHAKING_VCSEC"; break;
+            case TESLA_CSM_STATE_SECURE_VCSEC: from_str = "SECURE_VCSEC"; break;
+            case TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT: from_str = "HANDSHAKING_INFOTAINMENT"; break;
+            case TESLA_CSM_STATE_FULLY_SECURE: from_str = "FULLY_SECURE"; break;
+          }
+          const char *to_str = "UNKNOWN";
+          switch (current_state) {
+            case TESLA_CSM_STATE_DISCONNECTED: to_str = "DISCONNECTED"; break;
+            case TESLA_CSM_STATE_CONNECTING: to_str = "CONNECTING"; break;
+            case TESLA_CSM_STATE_HANDSHAKING_VCSEC: to_str = "HANDSHAKING_VCSEC"; break;
+            case TESLA_CSM_STATE_SECURE_VCSEC: to_str = "SECURE_VCSEC"; break;
+            case TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT: to_str = "HANDSHAKING_INFOTAINMENT"; break;
+            case TESLA_CSM_STATE_FULLY_SECURE: to_str = "FULLY_SECURE"; break;
+          }
+          ESP_LOGI(TAG, "[CSM] Zig Connection State Machine transitioned: %s -> %s (VCSEC attempts: %d, Infotainment attempts: %d)", 
+                   from_str, to_str, 
+                   (int)tesla_client_get_csm_vcsec_attempts(this->zig_client_), 
+                   (int)tesla_client_get_csm_infotainment_attempts(this->zig_client_));
+          this->prev_zig_csm_state_ = current_state;
+        }
+      }
+
       if (this->node_state != espbt::ClientState::ESTABLISHED)
       {
         if (!command_queue_.empty())
@@ -1224,6 +1270,7 @@ namespace esphome
     void TeslaBLEVehicle::set_vin(const char *vin)
     {
       tesla_ble_client_->setVIN(vin);
+      this->vin_ = vin;
     }
 
     void TeslaBLEVehicle::load_polling_parameters (const int post_wake_poll_time, const int poll_data_period,
@@ -1667,9 +1714,22 @@ namespace esphome
       {
       case Signatures_Session_Info_Status_SESSION_INFO_STATUS_OK:
         ESP_LOGD(TAG, "Session is valid: key paired with vehicle");
+        if (this->zig_client_ != nullptr) {
+          if (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
+            tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_VCSEC, millis());
+            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_VCSEC event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          } else if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+            tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_INFOTAINMENT, millis());
+            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_INFOTAINMENT event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          }
+        }
         break;
       case Signatures_Session_Info_Status_SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST:
         ESP_LOGE(TAG, "Session is invalid: Key not on whitelist");
+        if (this->zig_client_ != nullptr) {
+          tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_FAILED, millis());
+          ESP_LOGW(TAG, "[CSM] Sent HANDSHAKE_FAILED event to Zig (Key not on whitelist). New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+        }
         return 1;
       };
 
@@ -1728,6 +1788,17 @@ namespace esphome
     {
       auto session = tesla_ble_client_->getPeer(domain);
       session->setIsValid(false);
+
+      if (this->zig_client_ != nullptr) {
+        if (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
+          tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_SESSION_EXPIRED_VCSEC, millis());
+          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_VCSEC event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+        } else if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+          tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_SESSION_EXPIRED_INFOTAINMENT, millis());
+          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_INFOTAINMENT event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+        }
+      }
+
       // check if we need to update the state in the command queue
       if (!command_queue_.empty())
       {
@@ -2135,6 +2206,18 @@ namespace esphome
           }
           ESP_LOGD(TAG, "Connection ID: %s", format_hex(connection_id, 16).c_str());
           tesla_ble_client_->setConnectionID(connection_id);
+
+          if (this->zig_client_ != nullptr) {
+            tesla_client_init(
+                this->zig_client_,
+                reinterpret_cast<const uint8_t*>(this->vin_.c_str()),
+                this->vin_.length(),
+                nullptr,
+                connection_id
+            );
+            tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_BLE_CONNECTED, millis());
+            ESP_LOGI(TAG, "[CSM] Sent BLE_CONNECTED event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          }
         }
         break;
       }
@@ -2154,6 +2237,10 @@ namespace esphome
         last_vcsec_poll_time_ = 0;
 
         ble_disconnected_ = BleDisconnected;
+        if (this->zig_client_ != nullptr) {
+          tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_BLE_DISCONNECTED, millis());
+          ESP_LOGI(TAG, "[CSM] Sent BLE_DISCONNECTED event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+        }
         // set binary sensors to unknown
         if (ble_disconnected_min_time_ == 0)
         { // If delay time zero, then set Unknown on any disconnect however fleeting

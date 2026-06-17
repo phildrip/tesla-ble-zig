@@ -21,6 +21,7 @@
 #include <universal_message.pb.h>
 #include <vcsec.pb.h>
 #include <errors.h>
+#include "tesla_ble_zig.h"
 
 //#include "custom_binary_sensor.h"
 
@@ -480,6 +481,10 @@ namespace esphome
             void initializePrivateKey();
             void loadSessionInfo();
             void loadDomainSessionInfo(UniversalMessage_Domain domain);
+
+            void *zig_client_{nullptr};
+            std::string vin_;
+            uint8_t prev_zig_csm_state_{TESLA_CSM_STATE_DISCONNECTED};
         };
 
     } // namespace tesla_ble_vehicle
