@@ -271,20 +271,11 @@ namespace esphome
             int poll_data_period_;
             int poll_asleep_period_;
             int poll_charging_period_;
-            int car_just_woken_ = 0;
-            bool previous_asleep_state_ = false;
             bool one_off_update_ = false;
-            int car_wake_time_;
-            int last_infotainment_poll_time_;
-            int last_vcsec_poll_time_ = 0;
-            int esp32_just_started_ = 0;
-            int car_is_charging_ = NotCharging;
-            bool do_poll_ = false;
             BleConnectedStatus ble_disconnected_ = BleDisconnected;
             int ble_disconnected_time_;
             int ble_disconnected_min_time_;
             int fast_poll_if_unlocked_ = 1; // != 0 enables fast polling
-            int number_updates_since_connection_ = 0;
             UniversalMessage_RoutableMessage read_queue_message_;
             CarServer_Response static_carserver_response_;
             unsigned char static_message_buffer_[UniversalMessage_RoutableMessage_size];
@@ -483,6 +474,7 @@ namespace esphome
             void loadDomainSessionInfo(UniversalMessage_Domain domain);
 
             void *zig_client_{nullptr};
+            void *zig_scheduler_{nullptr};
             std::string vin_;
             uint8_t prev_zig_csm_state_{TESLA_CSM_STATE_DISCONNECTED};
         };

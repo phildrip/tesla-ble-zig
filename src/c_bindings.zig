@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 const session = @import("session.zig");
 const protobuf = @import("protobuf.zig");
 const client = @import("client.zig");
+const scheduler = @import("scheduler.zig");
 
 // Linker hooks to resolve randomness in a target-agnostic manner.
 // The consumer C/C++ application must implement this (e.g. calling esp_fill_random on ESP32).
@@ -421,6 +422,124 @@ export fn tesla_client_get_session_epoch(client_ptr: ?*anyopaque, domain_val: u3
     return @intFromEnum(ErrorCode.OK);
 }
 
+/// Returns the size in bytes of the `Scheduler` structure.
+export fn tesla_scheduler_size() usize {
+    return @sizeOf(scheduler.Scheduler);
+}
+
+/// Initialize the Scheduler structure in-place inside a pre-allocated memory buffer.
+export fn tesla_scheduler_init(
+    scheduler_ptr: ?*anyopaque,
+    post_wake_poll_time_ms: u32,
+    poll_data_period_ms: u32,
+    poll_asleep_period_ms: u32,
+    poll_charging_period_ms: u32,
+    fast_poll_if_unlocked: bool,
+    wake_on_boot: bool,
+) void {
+    const sp = scheduler_ptr orelse return;
+    const config = scheduler.SchedulerConfig{
+        .post_wake_poll_time_ms = post_wake_poll_time_ms,
+        .poll_data_period_ms = poll_data_period_ms,
+        .poll_asleep_period_ms = poll_asleep_period_ms,
+        .poll_charging_period_ms = poll_charging_period_ms,
+        .fast_poll_if_unlocked = fast_poll_if_unlocked,
+        .wake_on_boot = wake_on_boot,
+    };
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    s.* = scheduler.Scheduler.init(config);
+}
+
+/// Update the timing configuration of the scheduler dynamically.
+export fn tesla_scheduler_update_config(
+    scheduler_ptr: ?*anyopaque,
+    post_wake_poll_time_ms: u32,
+    poll_data_period_ms: u32,
+    poll_asleep_period_ms: u32,
+    poll_charging_period_ms: u32,
+) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    s.config.post_wake_poll_time_ms = post_wake_poll_time_ms;
+    s.config.poll_data_period_ms = poll_data_period_ms;
+    s.config.poll_asleep_period_ms = poll_asleep_period_ms;
+    s.config.poll_charging_period_ms = poll_charging_period_ms;
+}
+
+
+/// Perform a scheduler tick, returning decision outputs.
+export fn tesla_scheduler_tick(
+    scheduler_ptr: ?*anyopaque,
+    current_time_ms: u32,
+    is_asleep: bool,
+    is_unlocked: bool,
+    is_user_present: bool,
+    one_off_update: bool,
+    out_should_poll_vcsec: ?*bool,
+    out_should_poll_infotainment: ?*bool,
+    out_should_wake_vehicle: ?*bool,
+    out_clear_one_off_update: ?*bool,
+) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    const dec = s.tick(current_time_ms, is_asleep, is_unlocked, is_user_present, one_off_update);
+    if (out_should_poll_vcsec) |p| p.* = dec.should_poll_vcsec;
+    if (out_should_poll_infotainment) |p| p.* = dec.should_poll_infotainment;
+    if (out_should_wake_vehicle) |p| p.* = dec.should_wake_vehicle;
+    if (out_clear_one_off_update) |p| p.* = dec.clear_one_off_update;
+}
+
+/// Get the current internal charging state tracking of the scheduler.
+export fn tesla_scheduler_get_charging_state(scheduler_ptr: ?*anyopaque) u8 {
+    const sp = scheduler_ptr orelse return 0;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    return @intFromEnum(s.car_is_charging);
+}
+
+/// Set the internal charging state tracking of the scheduler.
+export fn tesla_scheduler_set_charging_state(scheduler_ptr: ?*anyopaque, charging_state: u8) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    const state: scheduler.ChargingState = @enumFromInt(charging_state);
+    s.car_is_charging = state;
+}
+
+/// Reset the VCSEC poll timestamp to 0.
+export fn tesla_scheduler_reset_vcsec_poll_time(scheduler_ptr: ?*anyopaque) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    s.last_vcsec_poll_time = 0;
+}
+
+/// Get the total number of Infotainment updates triggered since connection.
+export fn tesla_scheduler_get_number_updates_since_connection(scheduler_ptr: ?*anyopaque) u32 {
+    const sp = scheduler_ptr orelse return 0;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    return s.number_updates_since_connection;
+}
+
+/// Set the total number of Infotainment updates triggered since connection.
+export fn tesla_scheduler_set_number_updates_since_connection(scheduler_ptr: ?*anyopaque, count: u32) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    s.number_updates_since_connection = count;
+}
+
+/// Get the car's just woken state.
+export fn tesla_scheduler_get_car_just_woken(scheduler_ptr: ?*anyopaque) u8 {
+    const sp = scheduler_ptr orelse return 0;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    return @intFromEnum(s.car_just_woken);
+}
+
+/// Set the car's just woken state.
+export fn tesla_scheduler_set_car_just_woken(scheduler_ptr: ?*anyopaque, state: u8) void {
+    const sp = scheduler_ptr orelse return;
+    const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
+    const woken: scheduler.CarWakeState = @enumFromInt(state);
+    s.car_just_woken = woken;
+}
+
 // Host-native mock of tesla_random_bytes to compile unit tests
 fn mock_tesla_random_bytes(buf: [*]u8, len: usize) callconv(.c) void {
     var i: usize = 0;
@@ -479,4 +598,70 @@ test "C ABI Placement-Initialization and Communication Loop Verification" {
     tesla_client_handle_csm_event(client_buf.ptr, 7, 110); // handshake_failed
     try std.testing.expectEqual(@as(u8, 1), tesla_client_get_csm_state(client_buf.ptr)); // connecting
     try std.testing.expectEqual(@as(u8, 1), tesla_client_get_csm_vcsec_attempts(client_buf.ptr));
+}
+
+test "C ABI Scheduler Integration and State Updates" {
+    const size = tesla_scheduler_size();
+    try std.testing.expect(size > 0);
+
+    const sched_buf = try std.testing.allocator.alloc(u8, size);
+    defer std.testing.allocator.free(sched_buf);
+
+    tesla_scheduler_init(
+        sched_buf.ptr,
+        10000, // post_wake_poll_time_ms
+        5000,  // poll_data_period_ms
+        30000, // poll_asleep_period_ms
+        15000, // poll_charging_period_ms
+        true,  // fast_poll_if_unlocked
+        true,  // wake_on_boot
+    );
+
+    // Initial state check
+    try std.testing.expectEqual(@as(u8, 0), tesla_scheduler_get_charging_state(sched_buf.ptr));
+    try std.testing.expectEqual(@as(u32, 0), tesla_scheduler_get_number_updates_since_connection(sched_buf.ptr));
+    try std.testing.expectEqual(@as(u8, 0), tesla_scheduler_get_car_just_woken(sched_buf.ptr));
+
+    // Tick at boot cycle 0
+    var should_poll_vcsec = false;
+    var should_poll_infotainment = false;
+    var should_wake_vehicle = false;
+    var clear_one_off_update = false;
+
+    tesla_scheduler_tick(
+        sched_buf.ptr,
+        100, // current_time_ms
+        true, // is_asleep
+        false, // is_unlocked
+        false, // is_user_present
+        false, // one_off_update
+        &should_poll_vcsec,
+        &should_poll_infotainment,
+        &should_wake_vehicle,
+        &clear_one_off_update,
+    );
+
+    try std.testing.expectEqual(true, should_poll_vcsec);
+    try std.testing.expectEqual(false, should_poll_infotainment);
+    try std.testing.expectEqual(false, should_wake_vehicle);
+
+    // Boot cycle 1
+    tesla_scheduler_tick(sched_buf.ptr, 200, true, false, false, false, &should_poll_vcsec, &should_poll_infotainment, &should_wake_vehicle, &clear_one_off_update);
+    try std.testing.expectEqual(false, should_wake_vehicle);
+
+    // Boot cycle 2 -> should wake vehicle
+    tesla_scheduler_tick(sched_buf.ptr, 300, true, false, false, false, &should_poll_vcsec, &should_poll_infotainment, &should_wake_vehicle, &clear_one_off_update);
+    try std.testing.expectEqual(true, should_wake_vehicle);
+
+    // Test charging state and getters/setters
+    tesla_scheduler_set_charging_state(sched_buf.ptr, 2); // charging_ongoing
+    try std.testing.expectEqual(@as(u8, 2), tesla_scheduler_get_charging_state(sched_buf.ptr));
+
+    // Test car_just_woken getters/setters
+    tesla_scheduler_set_car_just_woken(sched_buf.ptr, 1); // yes_initial
+    try std.testing.expectEqual(@as(u8, 1), tesla_scheduler_get_car_just_woken(sched_buf.ptr));
+
+    // Test updates since connection getters/setters
+    tesla_scheduler_set_number_updates_since_connection(sched_buf.ptr, 42);
+    try std.testing.expectEqual(@as(u32, 42), tesla_scheduler_get_number_updates_since_connection(sched_buf.ptr));
 }

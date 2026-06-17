@@ -8,6 +8,7 @@ pub const protobuf = @import("protobuf.zig");
 pub const client = @import("client.zig");
 pub const c_bindings = @import("c_bindings.zig");
 pub const csm = @import("csm.zig");
+pub const scheduler = @import("scheduler.zig");
 
 test {
     // Reference tests to ensure they are built and executed by the build runner

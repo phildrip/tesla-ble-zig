@@ -66,6 +66,7 @@ namespace esphome
     {
       ESP_LOGCONFIG(TAG, "Constructing Tesla BLE Vehicle component");
       this->zig_client_ = malloc(tesla_client_size());
+      this->zig_scheduler_ = malloc(tesla_scheduler_size());
     }
 
     void TeslaBLEVehicle::setup()
@@ -1032,144 +1033,82 @@ namespace esphome
       if (this->node_state == espbt::ClientState::ESTABLISHED)
       {
         bool is_asleep = binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state;
-        bool should_poll_vcsec = false;
+        bool is_unlocked = binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state;
+        bool is_user_present = binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state;
 
-        if (!is_asleep)
-        {
-          should_poll_vcsec = true;
-        }
-        else if (poll_asleep_period_ != 0)
-        {
-          if (last_vcsec_poll_time_ == 0 || (millis() - last_vcsec_poll_time_) > poll_asleep_period_)
-          {
-            should_poll_vcsec = true;
-          }
-        }
-        else if (last_vcsec_poll_time_ == 0)
-        {
-          should_poll_vcsec = true;
+        bool should_poll_vcsec = false;
+        bool should_poll_infotainment = false;
+        bool should_wake_vehicle = false;
+        bool clear_one_off_update = false;
+
+        if (this->zig_scheduler_ != nullptr) {
+          tesla_scheduler_update_config(
+              this->zig_scheduler_,
+              this->post_wake_poll_time_,
+              this->poll_data_period_,
+              this->poll_asleep_period_,
+              this->poll_charging_period_
+          );
+
+          tesla_scheduler_tick(
+              this->zig_scheduler_,
+              millis(),
+              is_asleep,
+              is_unlocked,
+              is_user_present,
+              one_off_update_,
+              &should_poll_vcsec,
+              &should_poll_infotainment,
+              &should_wake_vehicle,
+              &clear_one_off_update
+          );
         }
 
         if (should_poll_vcsec)
         {
           ESP_LOGD(TAG, "Querying vehicle status update..");
           enqueueVCSECInformationRequest();
-          last_vcsec_poll_time_ = millis();
         }
-        /*
-        *	INFOTAINMENT data can only be collected when the car is awake, while VCSEC data also when the car is asleep.
-        *	Therefore we trigger polling for INFOTAINMENT data under the following circumstances:
-        *	- on startup. This might wake the car but we want the entities to have initial values.
-        *	- whenever the car wakes up. However, depending on the wake:
-        *	  - if the car woke up of its own accord, poll for post_wake_poll_time s every poll_data_period s and allow the car to
-        *     go back to sleep.
-        *	  - if the car was woken by someone getting in the car (door unlocked or user present), or the car is charging,
-        *     then poll continuously at update_interval to have the data as up to date as possible (eg shift state which some people
-        *		  want to use to trigger the opening of their electric gate) until the trigger state ends.
-        *   - Otherwise we poll the Infotainment system every poll_asleep_period s in case the car was charging, charging then stops
-        *     but resumes while the car has been awake continuously (otherwise we would never notice it's charging again). This period
-        *     should be chosen to be long enough so that the car will fall asleep if nothing else is happening to keep it awake.
-        */
-        switch (esp32_just_started_)
-        {
-        case 2:
-          // If the ESP32 has just started and wake on boot wanted, wake car even if already awake to get an initial poll of its data
-          if (wake_on_boot_ > 0)
-          {
-            wakeVehicle(); // wake will cause poll assuming car available
-          }
-          esp32_just_started_++;
-          ESP_LOGI (TAG, "Polling parameters: post_wake_poll_time_ %i, poll_data_period_  %i, poll_asleep_period_ %i, poll_charging_period_  %i, ble_disconnected_min_time_  %i, fast_poll_if_unlocked_ %i, wake_on_boot_ %i",
-            post_wake_poll_time_,
-            poll_data_period_,
-            poll_asleep_period_,
-            poll_charging_period_,
-            ble_disconnected_min_time_,
-            fast_poll_if_unlocked_,
-            wake_on_boot_);
-          break;
-        case 0:
-        case 1:
-          esp32_just_started_++;
-        // Beyond 2 this is no longer relevant
-        }
-        if (!binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state and previous_asleep_state_) // Remember, true means asleep
-        {
-          // Car has just woken, also record time it happened so can time out after configured time
-          car_just_woken_ = 1;
-          car_wake_time_ = millis();
-        }
-        if (binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state and !previous_asleep_state_) // Car has just gone to sleep
-        { // Belt & braces clear poll triggers if car is asleep
-          car_is_charging_ = NotCharging;
-        }
-        previous_asleep_state_ = binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state;
 
-        ESP_LOGI(TAG, "Reading INFOTAINMENT | State: %s | Just Woken: %s | Charging: %s | Lock: %s | User: %s | Fast Poll: %s",
-                 previous_asleep_state_ ? "ASLEEP" : "AWAKE",
-                 car_just_woken_ == 0 ? "NO" : (car_just_woken_ == 1 ? "YES (INITIAL)" : "YES (POLLING)"),
-                 car_is_charging_ == NotCharging ? "NO" : (car_is_charging_ == ChargingJustStarted ? "STARTING" : "YES"),
-                 binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state ? "UNLOCKED" : "LOCKED",
-                 binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state ? "PRESENT" : "NOT PRESENT",
-                 fast_poll_if_unlocked_ ? "ENABLED" : "DISABLED");
-        
-        //if (car_just_woken_ or OneOffUpdate or car_is_charging_ or this->is_unlocked_->state or this->is_user_present_->state)
-        if (one_off_update_ or (binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state and (fast_poll_if_unlocked_ > 0)) or binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state)
-        { // For these fastest poll rate is used
-          do_poll_ = true;
+        if (should_wake_vehicle)
+        {
+          wakeVehicle(); // wake will cause poll assuming car available
         }
-        else if (car_is_charging_ != NotCharging)
-        { // otherwise charging polls have priority
-          if (car_is_charging_ == ChargingJustStarted)
-          { // Do a poll as soon as notice car is charging
-            do_poll_ = true;
-            car_is_charging_ = ChargingOngoing;
-          }
-          else if (((millis() - last_infotainment_poll_time_) > poll_charging_period_))
-          { // subsequent polls on the configured repeat period
-            do_poll_ = true;
-          }
+
+        if (this->zig_scheduler_ != nullptr) {
+          uint8_t car_just_woken = tesla_scheduler_get_car_just_woken(this->zig_scheduler_);
+          uint8_t car_is_charging = tesla_scheduler_get_charging_state(this->zig_scheduler_);
+          ESP_LOGI(TAG, "Reading INFOTAINMENT | State: %s | Just Woken: %s | Charging: %s | Lock: %s | User: %s | Fast Poll: %s",
+                   is_asleep ? "ASLEEP" : "AWAKE",
+                   car_just_woken == 0 ? "NO" : (car_just_woken == 1 ? "YES (INITIAL)" : "YES (POLLING)"),
+                   car_is_charging == NotCharging ? "NO" : (car_is_charging == ChargingJustStarted ? "STARTING" : "YES"),
+                   is_unlocked ? "UNLOCKED" : "LOCKED",
+                   is_user_present ? "PRESENT" : "NOT PRESENT",
+                   fast_poll_if_unlocked_ ? "ENABLED" : "DISABLED");
         }
-        else if (car_just_woken_ != 0)
-        { // Just woken polls lower priority
-          if (car_just_woken_ == 1)
-          { // Do a poll as soon as the car awakes
-            do_poll_ = true;
-            car_just_woken_ = 2;
-          }
-          else if ((millis() - last_infotainment_poll_time_) > poll_data_period_)
-          { // subsequent polls on the configured repeat period
-            do_poll_ = true;
-          }
-        }
-        else if (poll_asleep_period_ != 0)
-        { // Try slower polls even when car is asleep unless set to 0
-          if ((millis() - last_infotainment_poll_time_) > poll_asleep_period_)
-          {
-            do_poll_ = true;
-          }
-        }
-        if (do_poll_)
+
+        if (should_poll_infotainment)
         {
           // Start retrieval of data from car. Each data type has its own frequency.
-          last_infotainment_poll_time_ = millis();
-          if ((number_updates_since_connection_ % get_action_detail(BLE_CarServer_VehicleAction::GET_CHARGE_STATE).numberUpdatesBetweenGets) == 0)
-              sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CHARGE_STATE, 0);
-          if ((number_updates_since_connection_ % get_action_detail(BLE_CarServer_VehicleAction::GET_DRIVE_STATE).numberUpdatesBetweenGets) == 0)
-            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_DRIVE_STATE, 0);
-          if ((number_updates_since_connection_ % get_action_detail(BLE_CarServer_VehicleAction::GET_CLIMATE_STATE).numberUpdatesBetweenGets) == 0)
-            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CLIMATE_STATE, 0);
-          if ((number_updates_since_connection_ % get_action_detail(BLE_CarServer_VehicleAction::GET_CLOSURES_STATE).numberUpdatesBetweenGets) == 0)
-            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CLOSURES_STATE, 0);
-          if ((number_updates_since_connection_ % get_action_detail(BLE_CarServer_VehicleAction::GET_TYRES_STATE).numberUpdatesBetweenGets) == 0)
-            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_TYRES_STATE, 0);
-          if ((car_just_woken_ != 0) and ((millis() - car_wake_time_) > post_wake_poll_time_))
-          {
-            car_just_woken_ = 0;
+          uint32_t num_updates = 0;
+          if (this->zig_scheduler_ != nullptr) {
+            num_updates = tesla_scheduler_get_number_updates_since_connection(this->zig_scheduler_) - 1;
           }
+          if ((num_updates % get_action_detail(BLE_CarServer_VehicleAction::GET_CHARGE_STATE).numberUpdatesBetweenGets) == 0)
+              sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CHARGE_STATE, 0);
+          if ((num_updates % get_action_detail(BLE_CarServer_VehicleAction::GET_DRIVE_STATE).numberUpdatesBetweenGets) == 0)
+            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_DRIVE_STATE, 0);
+          if ((num_updates % get_action_detail(BLE_CarServer_VehicleAction::GET_CLIMATE_STATE).numberUpdatesBetweenGets) == 0)
+            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CLIMATE_STATE, 0);
+          if ((num_updates % get_action_detail(BLE_CarServer_VehicleAction::GET_CLOSURES_STATE).numberUpdatesBetweenGets) == 0)
+            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_CLOSURES_STATE, 0);
+          if ((num_updates % get_action_detail(BLE_CarServer_VehicleAction::GET_TYRES_STATE).numberUpdatesBetweenGets) == 0)
+            sendCarServerVehicleActionMessage (BLE_CarServer_VehicleAction::GET_TYRES_STATE, 0);
+        }
+
+        if (clear_one_off_update)
+        {
           one_off_update_ = false; // Clear once a single cycle of data collection completed
-          do_poll_ = false;
-          number_updates_since_connection_++;
         }
         return;
       }
@@ -1258,6 +1197,13 @@ namespace esphome
       session->updateSession(session_info);
 
       if (this->zig_client_ != nullptr) {
+        if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+          if (tesla_client_get_csm_state(this->zig_client_) == TESLA_CSM_STATE_SECURE_VCSEC) {
+            tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_CONNECT_REQUESTED, millis());
+            ESP_LOGI(TAG, "[CSM] Sent CONNECT_REQUESTED event to Zig on Infotainment SessionInfo restore. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
+          }
+        }
+
         int32_t rc = tesla_client_handle_session_info_response(
             this->zig_client_,
             static_cast<uint32_t>(domain),
@@ -1389,7 +1335,20 @@ namespace esphome
       poll_charging_period_ = poll_charging_period * 1000;
       ble_disconnected_min_time_ = ble_disconnected_min_time * 1000;
       fast_poll_if_unlocked_ = fast_poll_if_unlocked;
-      wake_on_boot_ = wake_on_boot;
+
+      if (this->zig_scheduler_ != nullptr) {
+        tesla_scheduler_init(
+            this->zig_scheduler_,
+            post_wake_poll_time_,
+            poll_data_period_,
+            poll_asleep_period_,
+            poll_charging_period_,
+            fast_poll_if_unlocked != 0,
+            wake_on_boot != 0
+        );
+        ESP_LOGI(TAG, "Zig Scheduler initialized successfully via load_polling_parameters! Parameters: post_wake=%d, data=%d, asleep=%d, charging=%d, fast_poll=%d, wake_on_boot=%d",
+                 post_wake_poll_time_, poll_data_period_, poll_asleep_period_, poll_charging_period_, fast_poll_if_unlocked, wake_on_boot);
+      }
     }
 
     void TeslaBLEVehicle::regenerateKey()
@@ -1473,6 +1432,13 @@ namespace esphome
       }
 
       if (this->zig_client_ != nullptr) {
+        if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
+          if (tesla_client_get_csm_state(this->zig_client_) == TESLA_CSM_STATE_SECURE_VCSEC) {
+            tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_CONNECT_REQUESTED, millis());
+            ESP_LOGI(TAG, "[CSM] Sent CONNECT_REQUESTED event to Zig on Infotainment SessionInfoRequest. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
+          }
+        }
+
         unsigned char zig_message_buffer[UniversalMessage_RoutableMessage_size];
         size_t zig_message_length = 0;
         int32_t rc = tesla_client_build_session_info_request(
@@ -1727,7 +1693,9 @@ namespace esphome
       if (force)
       {
         one_off_update_ = true;
-        number_updates_since_connection_ = 0; // Ensures a one off update reads everything
+        if (this->zig_scheduler_ != nullptr) {
+          tesla_scheduler_set_number_updates_since_connection(this->zig_scheduler_, 0);
+        }
         action_str = "data update | forced";
       }
 
@@ -1778,7 +1746,9 @@ namespace esphome
               return_code = tesla_ble_client_->buildCarServerVehicleActionMessage (static_cast<int32_t>(param), static_message_buffer_, &message_length, get_action_detail(action).actionTag);
               if ((action == BLE_CarServer_VehicleAction::SET_CHARGING_SWITCH) and (param == 1))
               { // If charging has been requested, enable continuous polling
-                car_is_charging_ = ChargingJustStarted; //true;
+                if (this->zig_scheduler_ != nullptr) {
+                  tesla_scheduler_set_charging_state(this->zig_scheduler_, ChargingJustStarted);
+                }
               }
               break;
             default:
@@ -2005,7 +1975,9 @@ namespace esphome
           {
             ESP_LOGW(TAG, "[%s] INFOTAINMENT session invalid, requesting new session info..", current_command.execute_name.c_str());
             current_command.state = BLECommandState::WAITING_FOR_INFOTAINMENT_AUTH;
-            number_updates_since_connection_ = 0; // Infotainment will be reset so enable a read of all the sensors
+            if (this->zig_scheduler_ != nullptr) {
+              tesla_scheduler_set_number_updates_since_connection(this->zig_scheduler_, 0);
+            }
           }
           command_queue_.front() = current_command;
           break;
@@ -2130,7 +2102,11 @@ namespace esphome
               {
                 case CarServer_ChargeState_ChargingState_Starting_tag:
                 case CarServer_ChargeState_ChargingState_Charging_tag:
-                  if (car_is_charging_ == NotCharging) {car_is_charging_ = ChargingJustStarted;} // Set to 1 when charging starts to trigger immediate poll
+                  if (this->zig_scheduler_ != nullptr) {
+                    if (tesla_scheduler_get_charging_state(this->zig_scheduler_) == NotCharging) {
+                      tesla_scheduler_set_charging_state(this->zig_scheduler_, ChargingJustStarted);
+                    }
+                  }
                   break;
                 case CarServer_ChargeState_ChargingState_Unknown_tag:
                 case CarServer_ChargeState_ChargingState_Disconnected_tag:
@@ -2138,7 +2114,9 @@ namespace esphome
                 case CarServer_ChargeState_ChargingState_Stopped_tag:
                   publishSensor (NumericSensorId::MinsToLimit, NAN); // If not charging, minutes to limit makes no sense
                 default:
-                  car_is_charging_ = NotCharging;
+                  if (this->zig_scheduler_ != nullptr) {
+                    tesla_scheduler_set_charging_state(this->zig_scheduler_, NotCharging);
+                  }
               }
               std::string charging_state_text = lookup_charging_state (carserver_response.response_msg.vehicleData.charge_state.charging_state.which_type);
               publishSensor (TextSensorId::ChargingState, charging_state_text.c_str());
@@ -2381,8 +2359,10 @@ namespace esphome
           ESP_LOGI(TAG, "Connected successfully!");
           this->status_clear_warning();
           ble_disconnected_ = BleConnected;
-          number_updates_since_connection_ = 0; //Reset update loop counter
-          last_vcsec_poll_time_ = 0;
+          if (this->zig_scheduler_ != nullptr) {
+            tesla_scheduler_set_number_updates_since_connection(this->zig_scheduler_, 0);
+            tesla_scheduler_reset_vcsec_poll_time(this->zig_scheduler_);
+          }
           publishSensor (NumericSensorId::BleDisconnectedTime, 0);
 
           // generate random connection id 16 bytes
@@ -2406,6 +2386,7 @@ namespace esphome
             );
             tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_BLE_CONNECTED, millis());
             ESP_LOGI(TAG, "[CSM] Sent BLE_CONNECTED event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
+            this->loadSessionInfo();
           }
         }
         break;
@@ -2423,7 +2404,9 @@ namespace esphome
       {
         ESP_LOGW(TAG, "BLE connection closed!");
         this->node_state = espbt::ClientState::IDLE;
-        last_vcsec_poll_time_ = 0;
+        if (this->zig_scheduler_ != nullptr) {
+          tesla_scheduler_reset_vcsec_poll_time(this->zig_scheduler_);
+        }
 
         ble_disconnected_ = BleDisconnected;
         if (this->zig_client_ != nullptr) {

@@ -363,6 +363,134 @@ uint32_t tesla_client_get_session_counter(void *client_ptr, uint32_t domain_val)
  */
 int32_t tesla_client_get_session_epoch(void *client_ptr, uint32_t domain_val, uint8_t *out_epoch_16);
 
+/**
+ * @brief Get the size in bytes of the Scheduler structure.
+ * 
+ * @return Size in bytes.
+ */
+size_t tesla_scheduler_size(void);
+
+/**
+ * @brief Initialize the Scheduler in-place.
+ * 
+ * @param scheduler_ptr Pointer to a pre-allocated block of memory of at least `tesla_scheduler_size()` bytes.
+ * @param post_wake_poll_time_ms Milliseconds to poll after the car wakes up.
+ * @param poll_data_period_ms Interval to poll data when awake.
+ * @param poll_asleep_period_ms Interval to poll when asleep.
+ * @param poll_charging_period_ms Interval to poll when charging.
+ * @param fast_poll_if_unlocked Whether fast polling is enabled when unlocked.
+ * @param wake_on_boot Whether to wake the car on boot.
+ */
+void tesla_scheduler_init(
+    void *scheduler_ptr,
+    uint32_t post_wake_poll_time_ms,
+    uint32_t poll_data_period_ms,
+    uint32_t poll_asleep_period_ms,
+    uint32_t poll_charging_period_ms,
+    bool fast_poll_if_unlocked,
+    bool wake_on_boot
+);
+
+/**
+ * @brief Update the timing configuration of the scheduler dynamically.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @param post_wake_poll_time_ms Milliseconds to poll after the car wakes up.
+ * @param poll_data_period_ms Interval to poll data when awake.
+ * @param poll_asleep_period_ms Interval to poll when asleep.
+ * @param poll_charging_period_ms Interval to poll when charging.
+ */
+void tesla_scheduler_update_config(
+    void *scheduler_ptr,
+    uint32_t post_wake_poll_time_ms,
+    uint32_t poll_data_period_ms,
+    uint32_t poll_asleep_period_ms,
+    uint32_t poll_charging_period_ms
+);
+
+
+/**
+ * @brief Perform a scheduler tick, returning decision outputs.
+ * 
+ * @param scheduler_ptr Pointer to the initialized Scheduler.
+ * @param current_time_ms Current timestamp in milliseconds.
+ * @param is_asleep Whether the car is currently asleep.
+ * @param is_unlocked Whether the car is currently unlocked.
+ * @param is_user_present Whether a user is currently present in the car.
+ * @param one_off_update Whether a one-off poll has been requested.
+ * @param out_should_poll_vcsec Pointer to write the VCSEC polling decision.
+ * @param out_should_poll_infotainment Pointer to write the Infotainment polling decision.
+ * @param out_should_wake_vehicle Pointer to write the wake vehicle decision.
+ * @param out_clear_one_off_update Pointer to write whether to clear the one-off update request.
+ */
+void tesla_scheduler_tick(
+    void *scheduler_ptr,
+    uint32_t current_time_ms,
+    bool is_asleep,
+    bool is_unlocked,
+    bool is_user_present,
+    bool one_off_update,
+    bool *out_should_poll_vcsec,
+    bool *out_should_poll_infotainment,
+    bool *out_should_wake_vehicle,
+    bool *out_clear_one_off_update
+);
+
+/**
+ * @brief Get the current internal charging state tracking of the scheduler.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @return Internal charging state (0 = NotCharging, 1 = ChargingJustStarted, 2 = ChargingOngoing).
+ */
+uint8_t tesla_scheduler_get_charging_state(void *scheduler_ptr);
+
+/**
+ * @brief Set the internal charging state tracking of the scheduler.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @param charging_state State value (0 = NotCharging, 1 = ChargingJustStarted, 2 = ChargingOngoing).
+ */
+void tesla_scheduler_set_charging_state(void *scheduler_ptr, uint8_t charging_state);
+
+/**
+ * @brief Reset the VCSEC poll timestamp to 0.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ */
+void tesla_scheduler_reset_vcsec_poll_time(void *scheduler_ptr);
+
+/**
+ * @brief Get the total number of Infotainment updates triggered since connection.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @return Number of updates.
+ */
+uint32_t tesla_scheduler_get_number_updates_since_connection(void *scheduler_ptr);
+
+/**
+ * @brief Set the total number of Infotainment updates triggered since connection.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @param count Value to set.
+ */
+void tesla_scheduler_set_number_updates_since_connection(void *scheduler_ptr, uint32_t count);
+
+/**
+ * @brief Get the car's just woken state.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @return Just woken state (0 = no, 1 = yes_initial, 2 = yes_polling).
+ */
+uint8_t tesla_scheduler_get_car_just_woken(void *scheduler_ptr);
+
+/**
+ * @brief Set the car's just woken state.
+ * 
+ * @param scheduler_ptr Pointer to the Scheduler.
+ * @param state Just woken state.
+ */
+void tesla_scheduler_set_car_just_woken(void *scheduler_ptr, uint8_t state);
+
 #ifdef __cplusplus
 }
 #endif
