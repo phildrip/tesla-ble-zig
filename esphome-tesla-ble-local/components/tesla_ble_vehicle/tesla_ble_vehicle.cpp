@@ -19,6 +19,40 @@
 #include "log.h"
 #include "tesla_ble_vehicle.h"
 
+#include <mbedtls/pk.h>
+#include <mbedtls/ecp.h>
+
+namespace {
+    bool extract_raw_private_key(TeslaBLE::Client* client, uint8_t* out_raw_key) {
+        class FriendClient : public TeslaBLE::Client {
+        public:
+            mbedtls_pk_context* get_pk_context() {
+                return this->private_key_context_.get();
+            }
+        };
+        if (client == nullptr) return false;
+        FriendClient* friend_client = static_cast<FriendClient*>(client);
+        mbedtls_pk_context* pk_ctx = friend_client->get_pk_context();
+        if (pk_ctx == nullptr) return false;
+        mbedtls_ecp_keypair* ecp = mbedtls_pk_ec(*pk_ctx);
+        if (ecp == nullptr) return false;
+        int mpi_rc = mbedtls_mpi_write_binary(&ecp->private_d, out_raw_key, 32);
+        return (mpi_rc == 0);
+    }
+
+    const char* csm_state_to_string(uint8_t state) {
+        switch (state) {
+            case TESLA_CSM_STATE_DISCONNECTED: return "DISCONNECTED";
+            case TESLA_CSM_STATE_CONNECTING: return "CONNECTING";
+            case TESLA_CSM_STATE_HANDSHAKING_VCSEC: return "HANDSHAKING_VCSEC";
+            case TESLA_CSM_STATE_SECURE_VCSEC: return "SECURE_VCSEC";
+            case TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT: return "HANDSHAKING_INFOTAINMENT";
+            case TESLA_CSM_STATE_FULLY_SECURE: return "FULLY_SECURE";
+            default: return "UNKNOWN";
+        }
+    }
+}
+
 namespace esphome
 {
   namespace tesla_ble_vehicle
@@ -46,23 +80,46 @@ namespace esphome
       this->initializeFlash();
       this->openNVSHandle();
       this->initializePrivateKey();
-      this->loadSessionInfo();
 
       if (this->zig_client_ != nullptr) {
+        uint8_t raw_priv_key[32] = {0};
+        bool has_priv_key = extract_raw_private_key(this->tesla_ble_client_, raw_priv_key);
+        if (has_priv_key) {
+          ESP_LOGI(TAG, "[CSM] Extracted raw private key from C++ Client successfully.");
+        } else {
+          ESP_LOGW(TAG, "[CSM] Failed to extract raw private key from C++ Client, using fallback.");
+        }
+
         uint8_t dummy_conn_id[16] = {0};
         int32_t rc = tesla_client_init(
             this->zig_client_,
             reinterpret_cast<const uint8_t*>(this->vin_.c_str()),
             this->vin_.length(),
-            nullptr, // NULL private key since CSM doesn't need it at this step
+            has_priv_key ? raw_priv_key : nullptr,
             dummy_conn_id
         );
         if (rc == 0) {
           ESP_LOGI(TAG, "Zig Client initialized successfully with VIN %s!", this->vin_.c_str());
+
+          if (has_priv_key) {
+            uint8_t zig_pub_key[65] = {0};
+            tesla_client_get_public_key(this->zig_client_, zig_pub_key);
+
+            uint8_t cpp_pub_key[65] = {0};
+            this->tesla_ble_client_->getPublicKey(cpp_pub_key, sizeof(cpp_pub_key));
+
+            if (std::memcmp(zig_pub_key, cpp_pub_key, 65) == 0) {
+              ESP_LOGI(TAG, "[CSM] SUCCESS: Zig derived public key matches C++ public key perfectly!");
+            } else {
+              ESP_LOGE(TAG, "[CSM] ERROR: Zig public key does NOT match C++ public key!");
+            }
+          }
         } else {
           ESP_LOGE(TAG, "Failed to initialize Zig Client: %d", (int)rc);
         }
       }
+
+      this->loadSessionInfo();
     }
 
     void TeslaBLEVehicle::initializeFlash()
@@ -928,24 +985,8 @@ namespace esphome
       if (this->zig_client_ != nullptr) {
         uint8_t current_state = tesla_client_get_csm_state(this->zig_client_);
         if (current_state != this->prev_zig_csm_state_) {
-          const char *from_str = "UNKNOWN";
-          switch (this->prev_zig_csm_state_) {
-            case TESLA_CSM_STATE_DISCONNECTED: from_str = "DISCONNECTED"; break;
-            case TESLA_CSM_STATE_CONNECTING: from_str = "CONNECTING"; break;
-            case TESLA_CSM_STATE_HANDSHAKING_VCSEC: from_str = "HANDSHAKING_VCSEC"; break;
-            case TESLA_CSM_STATE_SECURE_VCSEC: from_str = "SECURE_VCSEC"; break;
-            case TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT: from_str = "HANDSHAKING_INFOTAINMENT"; break;
-            case TESLA_CSM_STATE_FULLY_SECURE: from_str = "FULLY_SECURE"; break;
-          }
-          const char *to_str = "UNKNOWN";
-          switch (current_state) {
-            case TESLA_CSM_STATE_DISCONNECTED: to_str = "DISCONNECTED"; break;
-            case TESLA_CSM_STATE_CONNECTING: to_str = "CONNECTING"; break;
-            case TESLA_CSM_STATE_HANDSHAKING_VCSEC: to_str = "HANDSHAKING_VCSEC"; break;
-            case TESLA_CSM_STATE_SECURE_VCSEC: to_str = "SECURE_VCSEC"; break;
-            case TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT: to_str = "HANDSHAKING_INFOTAINMENT"; break;
-            case TESLA_CSM_STATE_FULLY_SECURE: to_str = "FULLY_SECURE"; break;
-          }
+          const char *from_str = csm_state_to_string(this->prev_zig_csm_state_);
+          const char *to_str = csm_state_to_string(current_state);
           ESP_LOGI(TAG, "[CSM] Zig Connection State Machine transitioned: %s -> %s (VCSEC attempts: %d, Infotainment attempts: %d)", 
                    from_str, to_str, 
                    (int)tesla_client_get_csm_vcsec_attempts(this->zig_client_), 
@@ -1064,8 +1105,13 @@ namespace esphome
         }
         previous_asleep_state_ = binary_sensors_[static_cast<size_t>(BinarySensorId::IsAsleep)]->state;
 
-        ESP_LOGI (TAG, "Reading INFOTAINMENT, previous_asleep_state_=%d, car_just_woken_=%d, car_is_charging_=%d, Unlocked=%d, User=%d, fast_poll_if_unlocked_=%d",
-                  previous_asleep_state_, car_just_woken_, car_is_charging_, binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state, binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state, fast_poll_if_unlocked_);
+        ESP_LOGI(TAG, "Reading INFOTAINMENT | State: %s | Just Woken: %s | Charging: %s | Lock: %s | User: %s | Fast Poll: %s",
+                 previous_asleep_state_ ? "ASLEEP" : "AWAKE",
+                 car_just_woken_ == 0 ? "NO" : (car_just_woken_ == 1 ? "YES (INITIAL)" : "YES (POLLING)"),
+                 car_is_charging_ == NotCharging ? "NO" : (car_is_charging_ == ChargingJustStarted ? "STARTING" : "YES"),
+                 binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state ? "UNLOCKED" : "LOCKED",
+                 binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state ? "PRESENT" : "NOT PRESENT",
+                 fast_poll_if_unlocked_ ? "ENABLED" : "DISABLED");
         
         //if (car_just_woken_ or OneOffUpdate or car_is_charging_ or this->is_unlocked_->state or this->is_user_present_->state)
         if (one_off_update_ or (binary_sensors_[static_cast<size_t>(BinarySensorId::IsUnlocked)]->state and (fast_poll_if_unlocked_ > 0)) or binary_sensors_[static_cast<size_t>(BinarySensorId::IsUserPresent)]->state)
@@ -1195,7 +1241,7 @@ namespace esphome
       }
 
       ESP_LOGI(TAG, "Loaded %s session info from NVS", domain_to_string(domain));
-      ESP_LOGD(TAG, "Session info: %s", format_hex(session_info_protobuf.data(), required_session_info_size).c_str());
+      ESP_LOGI(TAG, "[DEBUG] Protobuf bytes (size: %zu): %s", required_session_info_size, format_hex(session_info_protobuf.data(), required_session_info_size).c_str());
 
       pb_istream_t stream = pb_istream_from_buffer(session_info_protobuf.data(), required_session_info_size);
       if (!pb_decode(&stream, Signatures_SessionInfo_fields, session_info))
@@ -1204,10 +1250,68 @@ namespace esphome
         return 1;
       }
 
+      ESP_LOGI(TAG, "[DEBUG] C++ parsed public key size: %zu, bytes: %s", (size_t)session_info->publicKey.size, format_hex(session_info->publicKey.bytes, session_info->publicKey.size).c_str());
+
       log_session_info(TAG, session_info);
 
       auto session = tesla_ble_client_->getPeer(domain);
       session->updateSession(session_info);
+
+      if (this->zig_client_ != nullptr) {
+        int32_t rc = tesla_client_handle_session_info_response(
+            this->zig_client_,
+            static_cast<uint32_t>(domain),
+            millis(),
+            session_info_protobuf.data(),
+            required_session_info_size
+        );
+        if (rc == 0) {
+          ESP_LOGI(TAG, "[CSM] Zig Client loaded %s session info from NVS successfully.", domain_to_string(domain));
+          
+          uint8_t zig_shared_secret[16] = {0};
+          tesla_client_get_shared_secret(this->zig_client_, static_cast<uint32_t>(domain), zig_shared_secret);
+
+          class FriendPeer : public TeslaBLE::Peer {
+          public:
+              const uint8_t* get_shared_secret() const { return this->shared_secret_sha1_; }
+          };
+          const FriendPeer* fp = static_cast<const FriendPeer*>(session);
+          const uint8_t* cpp_secret = fp->get_shared_secret();
+
+          if (cpp_secret != nullptr) {
+            if (std::memcmp(zig_shared_secret, cpp_secret, 16) == 0) {
+              ESP_LOGI(TAG, "[CSM] SUCCESS: Zig derived session key from NVS matches C++ perfectly!");
+            } else {
+              ESP_LOGE(TAG, "[CSM] ERROR: Zig session key from NVS mismatch!");
+              ESP_LOGE(TAG, "[CSM] C++ Secret: %s", format_hex(cpp_secret, 16).c_str());
+              ESP_LOGE(TAG, "[CSM] Zig Secret: %s", format_hex(zig_shared_secret, 16).c_str());
+            }
+          }
+          
+          uint32_t zig_counter = tesla_client_get_session_counter(this->zig_client_, static_cast<uint32_t>(domain));
+          uint32_t cpp_counter = session->getCounter();
+          if (zig_counter == cpp_counter) {
+            ESP_LOGI(TAG, "[CSM] SUCCESS: Zig NVS session counter matches C++ perfectly! (Counter: %u)", zig_counter);
+          } else {
+            ESP_LOGE(TAG, "[CSM] ERROR: Zig NVS session counter mismatch! (Zig: %u, C++: %u)", zig_counter, cpp_counter);
+          }
+
+          uint8_t zig_epoch[16] = {0};
+          tesla_client_get_session_epoch(this->zig_client_, static_cast<uint32_t>(domain), zig_epoch);
+          const uint8_t* cpp_epoch = reinterpret_cast<const uint8_t*>(session->getEpoch());
+          if (cpp_epoch != nullptr) {
+            if (std::memcmp(zig_epoch, cpp_epoch, 16) == 0) {
+              ESP_LOGI(TAG, "[CSM] SUCCESS: Zig NVS session epoch matches C++ perfectly!");
+            } else {
+              ESP_LOGE(TAG, "[CSM] ERROR: Zig NVS session epoch mismatch!");
+              ESP_LOGD(TAG, "[CSM] C++ Epoch: %s", format_hex(cpp_epoch, 16).c_str());
+              ESP_LOGD(TAG, "[CSM] Zig Epoch: %s", format_hex(zig_epoch, 16).c_str());
+            }
+          }
+        } else {
+          ESP_LOGE(TAG, "[CSM] Zig Client failed to load %s session info from NVS: %d", domain_to_string(domain), (int)rc);
+        }
+      }
 
       return 0;
     }
@@ -1366,6 +1470,30 @@ namespace esphome
       {
         ESP_LOGE(TAG, "Failed to build whitelist message");
         return return_code;
+      }
+
+      if (this->zig_client_ != nullptr) {
+        unsigned char zig_message_buffer[UniversalMessage_RoutableMessage_size];
+        size_t zig_message_length = 0;
+        int32_t rc = tesla_client_build_session_info_request(
+            this->zig_client_,
+            domain,
+            zig_message_buffer,
+            sizeof(zig_message_buffer),
+            &zig_message_length
+        );
+        if (rc == 0) {
+          ESP_LOGI(TAG, "[CSM] Zig Client built SessionInfoRequest successfully (size: %zu bytes).", zig_message_length);
+          if (zig_message_length == message_length && std::memcmp(zig_message_buffer, message_buffer, message_length) == 0) {
+            ESP_LOGI(TAG, "[CSM] SUCCESS: Zig SessionInfoRequest matches C++ output perfectly!");
+          } else {
+            ESP_LOGW(TAG, "[CSM] WARNING: Zig SessionInfoRequest differs from C++ output!");
+            ESP_LOGD(TAG, "[CSM] C++ Output: %s", format_hex(message_buffer, message_length).c_str());
+            ESP_LOGD(TAG, "[CSM] Zig Output: %s", format_hex(zig_message_buffer, zig_message_length).c_str());
+          }
+        } else {
+          ESP_LOGE(TAG, "[CSM] Zig Client failed to build SessionInfoRequest: %d", (int)rc);
+        }
       }
 
       return_code = writeBLE(message_buffer, message_length, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
@@ -1717,10 +1845,10 @@ namespace esphome
         if (this->zig_client_ != nullptr) {
           if (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
             tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_VCSEC, millis());
-            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_VCSEC event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_VCSEC event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
           } else if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
             tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_INFOTAINMENT, millis());
-            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_INFOTAINMENT event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+            ESP_LOGI(TAG, "[CSM] Sent HANDSHAKE_SUCCESS_INFOTAINMENT event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
           }
         }
         break;
@@ -1728,7 +1856,7 @@ namespace esphome
         ESP_LOGE(TAG, "Session is invalid: Key not on whitelist");
         if (this->zig_client_ != nullptr) {
           tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_HANDSHAKE_FAILED, millis());
-          ESP_LOGW(TAG, "[CSM] Sent HANDSHAKE_FAILED event to Zig (Key not on whitelist). New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          ESP_LOGW(TAG, "[CSM] Sent HANDSHAKE_FAILED event to Zig (Key not on whitelist). New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
         }
         return 1;
       };
@@ -1739,6 +1867,65 @@ namespace esphome
       {
         ESP_LOGE(TAG, "Failed to update session info");
         return return_code;
+      }
+
+      if (this->zig_client_ != nullptr) {
+        int32_t rc = tesla_client_handle_session_info_response(
+            this->zig_client_,
+            static_cast<uint32_t>(domain),
+            millis(),
+            message.payload.session_info.bytes,
+            message.payload.session_info.size
+        );
+        if (rc == 0) {
+          ESP_LOGI(TAG, "[CSM] Zig Client processed SessionInfo response successfully.");
+          
+          uint8_t zig_shared_secret[16] = {0};
+          tesla_client_get_shared_secret(this->zig_client_, static_cast<uint32_t>(domain), zig_shared_secret);
+
+          class FriendPeer : public TeslaBLE::Peer {
+          public:
+              const uint8_t* get_shared_secret() const { return this->shared_secret_sha1_; }
+          };
+          const FriendPeer* fp = static_cast<const FriendPeer*>(session);
+          const uint8_t* cpp_secret = fp->get_shared_secret();
+
+          if (cpp_secret != nullptr) {
+            if (std::memcmp(zig_shared_secret, cpp_secret, 16) == 0) {
+              ESP_LOGI(TAG, "[CSM] SUCCESS: Zig derived session key matches C++ perfectly!");
+              ESP_LOGD(TAG, "[CSM] Derived Secret: %s", format_hex(zig_shared_secret, 16).c_str());
+            } else {
+              ESP_LOGE(TAG, "[CSM] ERROR: Zig session key mismatch!");
+              ESP_LOGE(TAG, "[CSM] C++ Secret: %s", format_hex(cpp_secret, 16).c_str());
+              ESP_LOGE(TAG, "[CSM] Zig Secret: %s", format_hex(zig_shared_secret, 16).c_str());
+            }
+          } else {
+            ESP_LOGW(TAG, "[CSM] WARNING: C++ shared secret is null.");
+          }
+
+          uint32_t zig_counter = tesla_client_get_session_counter(this->zig_client_, static_cast<uint32_t>(domain));
+          uint32_t cpp_counter = session->getCounter();
+          if (zig_counter == cpp_counter) {
+            ESP_LOGI(TAG, "[CSM] SUCCESS: Zig session counter matches C++ perfectly! (Counter: %u)", zig_counter);
+          } else {
+            ESP_LOGE(TAG, "[CSM] ERROR: Zig session counter mismatch! (Zig: %u, C++: %u)", zig_counter, cpp_counter);
+          }
+
+          uint8_t zig_epoch[16] = {0};
+          tesla_client_get_session_epoch(this->zig_client_, static_cast<uint32_t>(domain), zig_epoch);
+          const uint8_t* cpp_epoch = reinterpret_cast<const uint8_t*>(session->getEpoch());
+          if (cpp_epoch != nullptr) {
+            if (std::memcmp(zig_epoch, cpp_epoch, 16) == 0) {
+              ESP_LOGI(TAG, "[CSM] SUCCESS: Zig session epoch matches C++ perfectly!");
+            } else {
+              ESP_LOGE(TAG, "[CSM] ERROR: Zig session epoch mismatch!");
+              ESP_LOGD(TAG, "[CSM] C++ Epoch: %s", format_hex(cpp_epoch, 16).c_str());
+              ESP_LOGD(TAG, "[CSM] Zig Epoch: %s", format_hex(zig_epoch, 16).c_str());
+            }
+          }
+        } else {
+          ESP_LOGE(TAG, "[CSM] Zig Client failed to handle SessionInfo response: %d", (int)rc);
+        }
       }
 
       // save session info to NVS
@@ -1792,10 +1979,10 @@ namespace esphome
       if (this->zig_client_ != nullptr) {
         if (domain == UniversalMessage_Domain_DOMAIN_VEHICLE_SECURITY) {
           tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_SESSION_EXPIRED_VCSEC, millis());
-          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_VCSEC event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_VCSEC event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
         } else if (domain == UniversalMessage_Domain_DOMAIN_INFOTAINMENT) {
           tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_SESSION_EXPIRED_INFOTAINMENT, millis());
-          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_INFOTAINMENT event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          ESP_LOGI(TAG, "[CSM] Sent SESSION_EXPIRED_INFOTAINMENT event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
         }
       }
 
@@ -2208,15 +2395,17 @@ namespace esphome
           tesla_ble_client_->setConnectionID(connection_id);
 
           if (this->zig_client_ != nullptr) {
+            uint8_t raw_priv_key[32] = {0};
+            bool has_priv_key = extract_raw_private_key(this->tesla_ble_client_, raw_priv_key);
             tesla_client_init(
                 this->zig_client_,
                 reinterpret_cast<const uint8_t*>(this->vin_.c_str()),
                 this->vin_.length(),
-                nullptr,
+                has_priv_key ? raw_priv_key : nullptr,
                 connection_id
             );
             tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_BLE_CONNECTED, millis());
-            ESP_LOGI(TAG, "[CSM] Sent BLE_CONNECTED event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+            ESP_LOGI(TAG, "[CSM] Sent BLE_CONNECTED event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
           }
         }
         break;
@@ -2239,7 +2428,7 @@ namespace esphome
         ble_disconnected_ = BleDisconnected;
         if (this->zig_client_ != nullptr) {
           tesla_client_handle_csm_event(this->zig_client_, TESLA_CSM_EVENT_BLE_DISCONNECTED, millis());
-          ESP_LOGI(TAG, "[CSM] Sent BLE_DISCONNECTED event to Zig. New CSM state: %d", (int)tesla_client_get_csm_state(this->zig_client_));
+          ESP_LOGI(TAG, "[CSM] Sent BLE_DISCONNECTED event to Zig. New CSM state: %s", csm_state_to_string(tesla_client_get_csm_state(this->zig_client_)));
         }
         // set binary sensors to unknown
         if (ble_disconnected_min_time_ == 0)

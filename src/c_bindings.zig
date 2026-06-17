@@ -390,6 +390,37 @@ export fn tesla_client_get_csm_infotainment_attempts(client_ptr: ?*anyopaque) u8
     return c.csm.infotainment_handshake_attempts;
 }
 
+/// Get the session key (shared secret) derived by the Zig Client for a given domain.
+export fn tesla_client_get_shared_secret(client_ptr: ?*anyopaque, domain_val: u32, out_secret_16: ?[*]u8) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_secret_16 orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const domain = @as(protocol.Domain, @enumFromInt(domain_val));
+    const peer = c.getPeer(domain) orelse return @intFromEnum(ErrorCode.InvalidDomain);
+    @memcpy(out[0..16], &peer.shared_secret);
+    return @intFromEnum(ErrorCode.OK);
+}
+
+/// Get the session sequence counter tracked by the Zig Client for a given domain.
+export fn tesla_client_get_session_counter(client_ptr: ?*anyopaque, domain_val: u32) u32 {
+    const cp = client_ptr orelse return 0;
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const domain = @as(protocol.Domain, @enumFromInt(domain_val));
+    const peer = c.getPeer(domain) orelse return 0;
+    return peer.counter;
+}
+
+/// Get the session epoch bytes tracked by the Zig Client for a given domain.
+export fn tesla_client_get_session_epoch(client_ptr: ?*anyopaque, domain_val: u32, out_epoch_16: ?[*]u8) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_epoch_16 orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const domain = @as(protocol.Domain, @enumFromInt(domain_val));
+    const peer = c.getPeer(domain) orelse return @intFromEnum(ErrorCode.InvalidDomain);
+    @memcpy(out[0..16], &peer.epoch);
+    return @intFromEnum(ErrorCode.OK);
+}
+
 // Host-native mock of tesla_random_bytes to compile unit tests
 fn mock_tesla_random_bytes(buf: [*]u8, len: usize) callconv(.c) void {
     var i: usize = 0;

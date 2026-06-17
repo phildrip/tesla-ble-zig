@@ -334,6 +334,35 @@ uint8_t tesla_client_get_csm_vcsec_attempts(void *client_ptr);
  */
 uint8_t tesla_client_get_csm_infotainment_attempts(void *client_ptr);
 
+/**
+ * @brief Get the session key (shared secret) derived by the Zig Client for a given domain.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param domain_val Domain of the session.
+ * @param out_secret_16 Pointer to the 16-byte destination buffer.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_get_shared_secret(void *client_ptr, uint32_t domain_val, uint8_t *out_secret_16);
+
+/**
+ * @brief Get the session sequence counter tracked by the Zig Client for a given domain.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param domain_val Domain of the session.
+ * @return The sequence counter value.
+ */
+uint32_t tesla_client_get_session_counter(void *client_ptr, uint32_t domain_val);
+
+/**
+ * @brief Get the session epoch bytes tracked by the Zig Client for a given domain.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param domain_val Domain of the session.
+ * @param out_epoch_16 Pointer to the 16-byte destination buffer.
+ * @return TESLA_OK on success, or an error code on failure.
+ */
+int32_t tesla_client_get_session_epoch(void *client_ptr, uint32_t domain_val, uint8_t *out_epoch_16);
+
 #ifdef __cplusplus
 }
 #endif

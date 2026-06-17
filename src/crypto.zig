@@ -56,9 +56,9 @@ pub fn computeSharedSecret(private_key: [32]u8, vehicle_public_key: [65]u8) ! [1
     const shared_point = try vehicle_point.mul(private_key, .big);
     const shared_sec1 = shared_point.toUncompressedSec1();
 
-    // Hash the shared SEC1 coordinates with SHA1
+    // Hash only the X coordinate of the shared point with SHA1
     var hash_out: [20]u8 = undefined;
-    Sha1.hash(&shared_sec1, &hash_out, .{});
+    Sha1.hash(shared_sec1[1..33], &hash_out, .{});
 
     // The session key is the first 16 bytes of the SHA1 hash
     var session_key: [16]u8 = undefined;
