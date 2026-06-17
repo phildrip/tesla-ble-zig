@@ -10,6 +10,7 @@ substitutions:
 
   ble_mac_address: !secret ble_mac_address
   tesla_vin: !secret tesla_vin
+  tesla_ble_component: "/tmp/esphome-tesla-ble/components"
 
 esphome:
   includes:
@@ -36,8 +37,8 @@ captive_portal:
 tesla_ble_vehicle:
   update_interval: 30s
   poll_asleep_period: 0
-  poll_data_period: 86400
-  poll_charging_period: 86400
+  poll_data_period: 60
+  poll_charging_period: 10
 
 packages:
   remote_package_files:

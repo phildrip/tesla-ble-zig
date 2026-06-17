@@ -34,10 +34,13 @@ test:
 	zig build test
 
 deploy-lib: build-riscv
-	@echo "Deploying RISC-V static library and glue layer to remote host $(REMOTE_HOST)..."
+	@echo "Deploying RISC-V static library, glue layer and config to remote host $(REMOTE_HOST)..."
 	scp zig-out/lib/libtesla_ble_zig.a $(REMOTE_HOST):/tmp/libtesla_ble_zig_riscv32.a
 	scp esphome/tesla_zig_glue.h $(REMOTE_HOST):/tmp/tesla_zig_glue.h
 	scp include/tesla_ble_zig.h $(REMOTE_HOST):/tmp/tesla_ble_zig.h
+	scp -r esphome-tesla-ble-local/components/* $(REMOTE_HOST):$(REMOTE_DIR)/components/
+	scp esphome/tesla-ble-nanoc6.yml $(REMOTE_HOST):$(REMOTE_DIR)/tesla-ble-nanoc6.yml
+	scp esphome/secrets.yaml $(REMOTE_HOST):$(REMOTE_DIR)/secrets.yaml
 
 compile-esphome: deploy-lib
 	@echo "Compiling ESPHome project remotely..."
