@@ -491,6 +491,114 @@ uint8_t tesla_scheduler_get_car_just_woken(void *scheduler_ptr);
  */
 void tesla_scheduler_set_car_just_woken(void *scheduler_ptr, uint8_t state);
 
+/**
+ * @brief Returns the size in bytes of the CommandQueue structure.
+ */
+size_t tesla_queue_size(void);
+
+/**
+ * @brief Initialize the CommandQueue structure in-place inside a pre-allocated memory buffer.
+ */
+void tesla_queue_init(void *queue_ptr);
+
+/**
+ * @brief Check if the command queue is empty.
+ */
+bool tesla_queue_empty(void *queue_ptr);
+
+/**
+ * @brief Get the current number of commands in the queue.
+ */
+size_t tesla_queue_count(void *queue_ptr);
+
+/**
+ * @brief Append a new command to the back of the queue.
+ * @return Generated unique command ID, or 0 on error.
+ */
+uint32_t tesla_queue_push_back(void *queue_ptr, uint32_t domain, uint32_t action, uint32_t current_time);
+
+/**
+ * @brief Prioritized insertion: inserts a command at the front (or second position if front is already active).
+ * @return Generated unique command ID, or 0 on error.
+ */
+uint32_t tesla_queue_place_at_front(void *queue_ptr, uint32_t domain, uint32_t action, uint32_t current_time);
+
+/**
+ * @brief Remove the front-most command from the queue.
+ */
+void tesla_queue_pop_front(void *queue_ptr);
+
+/**
+ * @brief Get the unique ID of the front-most command (returns 0 if empty).
+ */
+uint32_t tesla_queue_get_front_id(void *queue_ptr);
+
+/**
+ * @brief Get the domain of the front-most command (returns 0 if empty).
+ */
+uint32_t tesla_queue_get_front_domain(void *queue_ptr);
+
+/**
+ * @brief Get the action of the front-most command (returns 0 if empty).
+ */
+uint32_t tesla_queue_get_front_action(void *queue_ptr);
+
+/**
+ * @brief Get the state of the front-most command (returns 0/idle if empty).
+ */
+uint8_t tesla_queue_get_front_state(void *queue_ptr);
+
+/**
+ * @brief Set the state of the front-most command.
+ */
+void tesla_queue_set_front_state(void *queue_ptr, uint8_t state_val);
+
+/**
+ * @brief Get the started_at timestamp of the front-most command (returns 0 if empty).
+ */
+uint32_t tesla_queue_get_front_started_at(void *queue_ptr);
+
+/**
+ * @brief Set the started_at timestamp of the front-most command.
+ */
+void tesla_queue_set_front_started_at(void *queue_ptr, uint32_t timestamp);
+
+/**
+ * @brief Get the last_tx_at timestamp of the front-most command (returns 0 if empty).
+ */
+uint32_t tesla_queue_get_front_last_tx_at(void *queue_ptr);
+
+/**
+ * @brief Set the last_tx_at timestamp of the front-most command.
+ */
+void tesla_queue_set_front_last_tx_at(void *queue_ptr, uint32_t timestamp);
+
+/**
+ * @brief Get the retry count of the front-most command (returns 0 if empty).
+ */
+uint8_t tesla_queue_get_front_retry_count(void *queue_ptr);
+
+/**
+ * @brief Increment the retry count of the front-most command and return the new value.
+ */
+uint8_t tesla_queue_increment_front_retry_count(void *queue_ptr);
+
+/**
+ * @brief Set the retry count of the front-most command.
+ * 
+ */
+void tesla_queue_set_front_retry_count(void *queue_ptr, uint8_t count);
+
+/**
+ * @brief Get the done_times of the front-most command (returns 0 if empty).
+ */
+uint16_t tesla_queue_get_front_done_times(void *queue_ptr);
+
+/**
+ * @brief Set the done_times of the front-most command.
+ */
+void tesla_queue_set_front_done_times(void *queue_ptr, uint16_t done_times);
+
 #ifdef __cplusplus
 }
 #endif

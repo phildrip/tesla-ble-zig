@@ -7,6 +7,7 @@ const session = @import("session.zig");
 const protobuf = @import("protobuf.zig");
 const client = @import("client.zig");
 const scheduler = @import("scheduler.zig");
+const queue = @import("queue.zig");
 
 // Linker hooks to resolve randomness in a target-agnostic manner.
 // The consumer C/C++ application must implement this (e.g. calling esp_fill_random on ESP32).
@@ -538,6 +539,171 @@ export fn tesla_scheduler_set_car_just_woken(scheduler_ptr: ?*anyopaque, state: 
     const s = @as(*scheduler.Scheduler, @ptrCast(@alignCast(sp)));
     const woken: scheduler.CarWakeState = @enumFromInt(state);
     s.car_just_woken = woken;
+}
+
+/// Returns the size in bytes of the `CommandQueue` structure.
+/// Allows C/C++ compilers to allocate exactly the required stack space for placement initialization.
+export fn tesla_queue_size() usize {
+    return @sizeOf(queue.CommandQueue);
+}
+
+/// Initialize the CommandQueue structure in-place inside a pre-allocated memory buffer.
+export fn tesla_queue_init(queue_ptr: ?*anyopaque) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    q.* = queue.CommandQueue.init();
+}
+
+/// Check if the command queue is empty.
+export fn tesla_queue_empty(queue_ptr: ?*anyopaque) bool {
+    const qp = queue_ptr orelse return true;
+    const q = @as(*const queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    return q.empty();
+}
+
+/// Get the current number of commands in the queue.
+export fn tesla_queue_count(queue_ptr: ?*anyopaque) usize {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*const queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    return q.size();
+}
+
+/// Append a new command to the back of the queue. Returns the generated unique ID (or 0 on error).
+export fn tesla_queue_push_back(queue_ptr: ?*anyopaque, domain: u32, action: u32, current_time: u32) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    return q.pushBack(domain, action, current_time) catch 0;
+}
+
+/// Prioritized insertion: inserts a command at the front (or second position if front is already active).
+/// Returns the generated unique ID (or 0 on error).
+export fn tesla_queue_place_at_front(queue_ptr: ?*anyopaque, domain: u32, action: u32, current_time: u32) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    return q.placeAtFront(domain, action, current_time) catch 0;
+}
+
+/// Remove the front-most command from the queue.
+export fn tesla_queue_pop_front(queue_ptr: ?*anyopaque) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    q.popFront();
+}
+
+/// Get the unique ID of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_id(queue_ptr: ?*anyopaque) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.id;
+}
+
+/// Get the domain of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_domain(queue_ptr: ?*anyopaque) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.domain;
+}
+
+/// Get the action of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_action(queue_ptr: ?*anyopaque) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.action;
+}
+
+/// Get the state of the front-most command (returns 0/idle if empty).
+export fn tesla_queue_get_front_state(queue_ptr: ?*anyopaque) u8 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return @intFromEnum(cmd.state);
+}
+
+/// Set the state of the front-most command.
+export fn tesla_queue_set_front_state(queue_ptr: ?*anyopaque, state_val: u8) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return;
+    const state: queue.CommandState = @enumFromInt(state_val);
+    cmd.state = state;
+}
+
+/// Get the started_at timestamp of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_started_at(queue_ptr: ?*anyopaque) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.started_at;
+}
+
+/// Set the started_at timestamp of the front-most command.
+export fn tesla_queue_set_front_started_at(queue_ptr: ?*anyopaque, timestamp: u32) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return;
+    cmd.started_at = timestamp;
+}
+
+/// Get the last_tx_at timestamp of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_last_tx_at(queue_ptr: ?*anyopaque) u32 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.last_tx_at;
+}
+
+/// Set the last_tx_at timestamp of the front-most command.
+export fn tesla_queue_set_front_last_tx_at(queue_ptr: ?*anyopaque, timestamp: u32) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return;
+    cmd.last_tx_at = timestamp;
+}
+
+/// Get the retry count of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_retry_count(queue_ptr: ?*anyopaque) u8 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.retry_count;
+}
+
+/// Increment the retry count of the front-most command and return the new value.
+export fn tesla_queue_increment_front_retry_count(queue_ptr: ?*anyopaque) u8 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    if (cmd.retry_count < 255) {
+        cmd.retry_count += 1;
+    }
+    return cmd.retry_count;
+}
+
+/// Set the retry count of the front-most command.
+export fn tesla_queue_set_front_retry_count(queue_ptr: ?*anyopaque, count: u8) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return;
+    cmd.retry_count = count;
+}
+
+/// Get the done_times of the front-most command (returns 0 if empty).
+export fn tesla_queue_get_front_done_times(queue_ptr: ?*anyopaque) u16 {
+    const qp = queue_ptr orelse return 0;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return 0;
+    return cmd.done_times;
+}
+
+/// Set the done_times of the front-most command.
+export fn tesla_queue_set_front_done_times(queue_ptr: ?*anyopaque, done_times: u16) void {
+    const qp = queue_ptr orelse return;
+    const q = @as(*queue.CommandQueue, @ptrCast(@alignCast(qp)));
+    const cmd = q.getFront() orelse return;
+    cmd.done_times = done_times;
 }
 
 // Host-native mock of tesla_random_bytes to compile unit tests

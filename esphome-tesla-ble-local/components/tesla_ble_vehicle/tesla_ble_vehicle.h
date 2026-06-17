@@ -313,6 +313,7 @@ namespace esphome
             int wakeVehicle(void);
             int lockVehicle (VCSEC_RKEAction_E lock);
             void placeAtFrontOfQueue (UniversalMessage_Domain domain, std::function<int()> execute, std::string execute_name, BLE_CarServer_VehicleAction action = BLE_CarServer_VehicleAction::DO_NOTHING);
+            uint32_t push_back_command(UniversalMessage_Domain domain, std::function<int()> execute, std::string execute_name, BLE_CarServer_VehicleAction action = BLE_CarServer_VehicleAction::DO_NOTHING);
     
             int sendVCSECActionMessage(VCSEC_RKEAction_E action);
             int sendVCSECClosureMoveRequestMessage (int moveWhat, VCSEC_ClosureMoveType_E moveType);
@@ -330,7 +331,12 @@ namespace esphome
     *   and any other tidying up carried out (eg emptying the read and response queues).
     */
     {
-      command_queue_.pop();
+      if (this->zig_queue_ != nullptr)
+      {
+        uint32_t front_id = tesla_queue_get_front_id(this->zig_queue_);
+        this->command_callbacks_.erase(front_id);
+        tesla_queue_pop_front(this->zig_queue_);
+      }
       ble_read_buffer_.clear();         // Clear anything that's been received and not processed
       if (!response_queue_.empty())           // Empty the response queue if there's anything in it
       {
@@ -446,7 +452,6 @@ namespace esphome
             std::queue<BLERXChunk> ble_read_queue_;
             std::queue<BLEResponse> response_queue_;
             std::queue<BLETXChunk> ble_write_queue_;
-            std::queue<BLECommand> command_queue_;
 
             TeslaBLE::Client *tesla_ble_client_;
             uint32_t storage_handle_;
@@ -475,6 +480,8 @@ namespace esphome
 
             void *zig_client_{nullptr};
             void *zig_scheduler_{nullptr};
+            void *zig_queue_{nullptr};
+            std::unordered_map<uint32_t, std::pair<std::function<int()>, std::string>> command_callbacks_;
             std::string vin_;
             uint8_t prev_zig_csm_state_{TESLA_CSM_STATE_DISCONNECTED};
         };
