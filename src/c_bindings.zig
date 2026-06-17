@@ -9,6 +9,11 @@ const client = @import("client.zig");
 const scheduler = @import("scheduler.zig");
 const queue = @import("queue.zig");
 
+// Force compilation and inclusion of the pure-Zig firmware entry point (and BLE/HA-discovery)
+// and the JNI bridging symbols for Android.
+pub const firmware = @import("firmware.zig");
+pub const jni_bindings = @import("jni_bindings.zig");
+
 // Linker hooks to resolve randomness in a target-agnostic manner.
 // The consumer C/C++ application must implement this (e.g. calling esp_fill_random on ESP32).
 extern fn tesla_random_bytes(buf: [*]u8, len: usize) void;

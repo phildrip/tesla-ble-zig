@@ -1,0 +1,15 @@
+# ESP-IDF SDK configuration defaults for pure-Zig Tesla BLE firmware
+CONFIG_IDF_TARGET="esp32c6"
+
+# Configure Bluetooth Stack to use NimBLE (C-native stack, highly efficient)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
+
+# Memory and Partition sizes
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Wi-Fi configurations
+CONFIG_ESP_WIFI_ENABLED=y

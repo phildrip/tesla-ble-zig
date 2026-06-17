@@ -68,6 +68,76 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    // -------------------------------------------------------------
+    // Mobile Targets Step (Android shared libraries & iOS static libraries)
+    // -------------------------------------------------------------
+    const mobile_step = b.step("mobile", "Build mobile libraries (Android shared libraries & iOS static libraries)");
+
+    const mobile_targets = [_]struct {
+        name: []const u8,
+        arch: std.Target.Cpu.Arch,
+        os: std.Target.Os.Tag,
+        abi: ?std.Target.Abi,
+        linkage: std.builtin.LinkMode,
+        sub_dir: []const u8,
+    }{
+        .{
+            .name = "tesla_ble_zig",
+            .arch = .aarch64,
+            .os = .linux,
+            .abi = .android,
+            .linkage = .dynamic,
+            .sub_dir = "mobile/android/arm64-v8a",
+        },
+        .{
+            .name = "tesla_ble_zig",
+            .arch = .x86_64,
+            .os = .linux,
+            .abi = .android,
+            .linkage = .dynamic,
+            .sub_dir = "mobile/android/x86_64",
+        },
+        .{
+            .name = "tesla_ble_zig",
+            .arch = .aarch64,
+            .os = .ios,
+            .abi = null,
+            .linkage = .static,
+            .sub_dir = "mobile/ios/device",
+        },
+        .{
+            .name = "tesla_ble_zig",
+            .arch = .aarch64,
+            .os = .ios,
+            .abi = .simulator,
+            .linkage = .static,
+            .sub_dir = "mobile/ios/simulator",
+        },
+    };
+
+    for (mobile_targets) |mt| {
+        const m_target = b.resolveTargetQuery(.{
+            .cpu_arch = mt.arch,
+            .os_tag = mt.os,
+            .abi = mt.abi,
+        });
+
+        const m_lib = b.addLibrary(.{
+            .name = mt.name,
+            .linkage = mt.linkage,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/c_bindings.zig"),
+                .target = m_target,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+
+        const m_install = b.addInstallArtifact(m_lib, .{
+            .dest_dir = .{ .override = .{ .custom = mt.sub_dir } },
+        });
+        mobile_step.dependOn(&m_install.step);
+    }
+
     if (target.result.os.tag != .freestanding) {
         const exe = b.addExecutable(.{
             .name = "tesla_ble_zig",

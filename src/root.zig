@@ -10,6 +10,9 @@ pub const c_bindings = @import("c_bindings.zig");
 pub const csm = @import("csm.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const queue = @import("queue.zig");
+pub const firmware = @import("firmware.zig");
+pub const nimble = @import("nimble.zig");
+pub const jni = @import("jni_bindings.zig");
 
 test {
     // Reference tests to ensure they are built and executed by the build runner
