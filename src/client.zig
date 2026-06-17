@@ -4,6 +4,7 @@ const crypto = @import("crypto.zig");
 const protocol = @import("protocol.zig");
 const session = @import("session.zig");
 const protobuf = @import("protobuf.zig");
+const csm = @import("csm.zig");
 
 pub const Client = struct {
     key_pair: crypto.KeyPair,
@@ -12,6 +13,7 @@ pub const Client = struct {
     session_infotainment: session.Session,
     last_request_hash: [17]u8,
     last_request_hash_len: usize,
+    csm: csm.ConnectionStateMachine,
 
     /// Create a new Tesla BLE Client with a specified VIN and connection ID.
     /// If private_key_bytes is provided, loads the existing identity.
@@ -29,6 +31,7 @@ pub const Client = struct {
             .session_infotainment = try session.Session.init(.infotainment, vin),
             .last_request_hash = [_]u8{0} ** 17,
             .last_request_hash_len = 0,
+            .csm = csm.ConnectionStateMachine.init(),
         };
     }
 
@@ -234,16 +237,44 @@ pub const Client = struct {
         const active_sess = self.getPeer(domain) orelse return error.InvalidDomain;
         const info = try protobuf.SessionInfo.decode(session_info_bytes);
 
-        if (info.status != 0) return error.KeyNotOnWhitelist;
+        if (info.status != 0) {
+            self.csm.handleEvent(.handshake_failed, current_timestamp);
+            return error.KeyNotOnWhitelist;
+        }
 
-        try active_sess.updateSession(
+        active_sess.updateSession(
             info.epoch,
             info.counter,
             info.clock_time,
             current_timestamp,
             info.public_key,
             self.key_pair.private_key,
-        );
+        ) catch |err| {
+            self.csm.handleEvent(.handshake_failed, current_timestamp);
+            return err;
+        };
+
+        const event: csm.Event = switch (domain) {
+            .vehicle_security => .handshake_success_vcsec,
+            .infotainment => .handshake_success_infotainment,
+            else => return,
+        };
+        self.csm.handleEvent(event, current_timestamp);
+    }
+
+    pub fn handleBleConnected(self: *Client, current_timestamp: u32) void {
+        self.csm.handleEvent(.ble_connected, current_timestamp);
+    }
+
+    pub fn handleBleDisconnected(self: *Client, current_timestamp: u32) void {
+        self.csm.handleEvent(.ble_disconnected, current_timestamp);
+        // Reset/invalidate active session states upon physical BLE link loss
+        self.session_vcsec.is_valid = false;
+        self.session_infotainment.is_valid = false;
+    }
+
+    pub fn handleConnectRequested(self: *Client, current_timestamp: u32) void {
+        self.csm.handleEvent(.connect_requested, current_timestamp);
     }
 
     /// Decrypt an incoming vehicle response BLE payload using current cached session states.

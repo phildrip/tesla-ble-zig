@@ -45,6 +45,32 @@ typedef enum {
 } tesla_domain_t;
 
 /**
+ * @brief Distinct states of the Tesla Connection State Machine (CSM).
+ */
+typedef enum {
+    TESLA_CSM_STATE_DISCONNECTED = 0,
+    TESLA_CSM_STATE_CONNECTING = 1,
+    TESLA_CSM_STATE_HANDSHAKING_VCSEC = 2,
+    TESLA_CSM_STATE_SECURE_VCSEC = 3,
+    TESLA_CSM_STATE_HANDSHAKING_INFOTAINMENT = 4,
+    TESLA_CSM_STATE_FULLY_SECURE = 5
+} tesla_csm_state_t;
+
+/**
+ * @brief Events that trigger transitions in the Connection State Machine (CSM).
+ */
+typedef enum {
+    TESLA_CSM_EVENT_CONNECT_REQUESTED = 0,
+    TESLA_CSM_EVENT_BLE_CONNECTED = 1,
+    TESLA_CSM_EVENT_BLE_DISCONNECTED = 2,
+    TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_VCSEC = 3,
+    TESLA_CSM_EVENT_HANDSHAKE_SUCCESS_INFOTAINMENT = 4,
+    TESLA_CSM_EVENT_SESSION_EXPIRED_VCSEC = 5,
+    TESLA_CSM_EVENT_SESSION_EXPIRED_INFOTAINMENT = 6,
+    TESLA_CSM_EVENT_HANDSHAKE_FAILED = 7
+} tesla_csm_event_t;
+
+/**
  * @brief External random number generation hook.
  * 
  * @important The consumer C/C++ application MUST implement this function!
@@ -274,6 +300,39 @@ int32_t tesla_client_decrypt_response(
     size_t out_buffer_len,
     size_t *out_written_len
 );
+
+/**
+ * @brief Get the current Connection State Machine state.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @return State value matching tesla_csm_state_t.
+ */
+uint8_t tesla_client_get_csm_state(void *client_ptr);
+
+/**
+ * @brief Handle a Connection State Machine event from the C environment.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @param event_val Event value matching tesla_csm_event_t.
+ * @param current_timestamp Current epoch timestamp or synchronized counter.
+ */
+void tesla_client_handle_csm_event(void *client_ptr, uint8_t event_val, uint32_t current_timestamp);
+
+/**
+ * @brief Get the number of VCSEC handshake attempts since last success.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @return Number of attempts.
+ */
+uint8_t tesla_client_get_csm_vcsec_attempts(void *client_ptr);
+
+/**
+ * @brief Get the number of Infotainment handshake attempts since last success.
+ * 
+ * @param client_ptr Pointer to the initialized Client.
+ * @return Number of attempts.
+ */
+uint8_t tesla_client_get_csm_infotainment_attempts(void *client_ptr);
 
 #ifdef __cplusplus
 }

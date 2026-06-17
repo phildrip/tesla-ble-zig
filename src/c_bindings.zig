@@ -348,6 +348,48 @@ export fn tesla_client_decrypt_response(
     return @intFromEnum(ErrorCode.OK);
 }
 
+/// Get the current Connection State Machine state.
+export fn tesla_client_get_csm_state(client_ptr: ?*anyopaque) u8 {
+    const cp = client_ptr orelse return 0; // default to disconnected (0)
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    return @intFromEnum(c.csm.state);
+}
+
+/// Handle a Connection State Machine event from the C environment.
+export fn tesla_client_handle_csm_event(client_ptr: ?*anyopaque, event_val: u8, current_timestamp: u32) void {
+    const cp = client_ptr orelse return;
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    
+    const Event = @import("csm.zig").Event;
+    var valid = false;
+    inline for (std.meta.fields(Event)) |f| {
+        if (event_val == f.value) valid = true;
+    }
+    if (!valid) return;
+    
+    const event: Event = @enumFromInt(event_val);
+    switch (event) {
+        .ble_disconnected => c.handleBleDisconnected(current_timestamp),
+        .ble_connected => c.handleBleConnected(current_timestamp),
+        .connect_requested => c.handleConnectRequested(current_timestamp),
+        else => c.csm.handleEvent(event, current_timestamp),
+    }
+}
+
+/// Get the number of VCSEC handshake attempts.
+export fn tesla_client_get_csm_vcsec_attempts(client_ptr: ?*anyopaque) u8 {
+    const cp = client_ptr orelse return 0;
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    return c.csm.vcsec_handshake_attempts;
+}
+
+/// Get the number of Infotainment handshake attempts.
+export fn tesla_client_get_csm_infotainment_attempts(client_ptr: ?*anyopaque) u8 {
+    const cp = client_ptr orelse return 0;
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    return c.csm.infotainment_handshake_attempts;
+}
+
 // Host-native mock of tesla_random_bytes to compile unit tests
 fn mock_tesla_random_bytes(buf: [*]u8, len: usize) callconv(.c) void {
     var i: usize = 0;
@@ -394,5 +436,16 @@ test "C ABI Placement-Initialization and Communication Loop Verification" {
     tesla_client_get_key_id(client_buf.ptr, &key_id);
     try std.testing.expect(key_id[0] != 0);
 
-    // We can verify that we can load the compiled bindings natively
+    // Verify CSM bindings
+    try std.testing.expectEqual(@as(u8, 0), tesla_client_get_csm_state(client_buf.ptr));
+
+    tesla_client_handle_csm_event(client_buf.ptr, 0, 100); // connect_requested
+    try std.testing.expectEqual(@as(u8, 1), tesla_client_get_csm_state(client_buf.ptr)); // connecting
+
+    tesla_client_handle_csm_event(client_buf.ptr, 1, 105); // ble_connected
+    try std.testing.expectEqual(@as(u8, 2), tesla_client_get_csm_state(client_buf.ptr)); // handshaking_vcsec
+
+    tesla_client_handle_csm_event(client_buf.ptr, 7, 110); // handshake_failed
+    try std.testing.expectEqual(@as(u8, 1), tesla_client_get_csm_state(client_buf.ptr)); // connecting
+    try std.testing.expectEqual(@as(u8, 1), tesla_client_get_csm_vcsec_attempts(client_buf.ptr));
 }
