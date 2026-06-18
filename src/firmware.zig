@@ -23,11 +23,19 @@ var mqtt_broker_pass: [*:0]const u8 = undefined;
 var vehicle_vin: [*:0]const u8 = undefined;
 var ble_mac_address: [*:0]const u8 = undefined;
 var api_encryption_key: [*:0]const u8 = undefined;
+var vehicle_public_key_str: [*:0]const u8 = undefined;
 
 // Active global Client and CommandQueue structures
 pub var client_inst: client_module.Client = undefined;
 pub var queue_inst: queue_module.CommandQueue = undefined;
 pub var is_initialized: bool = false;
+
+fn parseHexKey(hex: []const u8, out: []u8) !void {
+    if (hex.len != out.len * 2) return error.InvalidLength;
+    for (out, 0..) |*b, i| {
+        b.* = try std.fmt.parseInt(u8, hex[i * 2 .. i * 2 + 2], 16);
+    }
+}
 
 /// Get system millisecond timestamp in a platform-agnostic manner.
 pub fn getMillis() u32 {
@@ -51,6 +59,7 @@ pub export fn tesla_zig_app_main(
     vin: [*:0]const u8,
     ble_mac: [*:0]const u8,
     api_key: [*:0]const u8,
+    vehicle_pub_key: [*:0]const u8,
 ) callconv(.c) void {
     std.log.info("🚗 Starting Pure-Zig Standalone Tesla BLE Firmware...", .{});
 
@@ -62,6 +71,7 @@ pub export fn tesla_zig_app_main(
     vehicle_vin = vin;
     ble_mac_address = ble_mac;
     api_encryption_key = api_key;
+    vehicle_public_key_str = vehicle_pub_key;
 
     std.log.info("[System] Initialized config SSID: {s}, Broker: {s}, User: {s}, VIN: {s}, MAC: {s}", .{
         wifi_ssid,
@@ -87,6 +97,22 @@ pub export fn tesla_zig_app_main(
         std.log.err("Failed to initialize Client: {any}", .{err});
         return;
     };
+
+    // Load static vehicle public key if configured
+    const v_pub_key_span = std.mem.span(vehicle_public_key_str);
+    if (v_pub_key_span.len > 0 and !std.mem.eql(u8, v_pub_key_span, "your_vehicle_public_key_hex")) {
+        var vehicle_public_key_raw = [_]u8{0} ** 65;
+        parseHexKey(v_pub_key_span, &vehicle_public_key_raw) catch |err| {
+            std.log.err("Failed to parse vehicle_pub_key hex string: {any}", .{err});
+        };
+        if (vehicle_public_key_raw[0] == 0x04) {
+            client_inst.setVehiclePublicKey(vehicle_public_key_raw);
+            std.log.info("[System] Successfully parsed and set static vehicle public key.", .{});
+        } else {
+            std.log.err("[System] Parsed vehicle public key is invalid (must start with 0x04 uncompressed SEC1 prefix)", .{});
+        }
+    }
+
     queue_inst = queue_module.CommandQueue.init();
     is_initialized = true;
 
@@ -249,17 +275,57 @@ pub fn sendHandshakeRequest(domain: @import("protocol.zig").Domain) void {
     nimble_layer.writeTxCharacteristic(buffer[0..len]);
 }
 
+var rx_reassembly_buf: [512]u8 = undefined;
+var rx_reassembly_len: usize = 0;
+var rx_expected_len: usize = 0;
+
 pub fn handleRxNotification(payload: []const u8) void {
     if (!is_initialized) return;
 
-    std.log.info("[Firmware] Processing RX notification ({d} bytes)...", .{payload.len});
+    std.log.info("[Firmware] Received packet fragment ({d} bytes)...", .{payload.len});
 
-    if (payload.len < 2) return;
-    const msg_len = (@as(usize, payload[0]) << 8) | payload[1];
-    if (payload.len < msg_len + 2) {
-        std.log.err("Incomplete BLE payload received. Expected {d} bytes, got {d} bytes.", .{msg_len + 2, payload.len});
+    // If starting a new packet assembly
+    if (rx_reassembly_len == 0) {
+        if (payload.len < 2) {
+            std.log.err("Packet too short to read length prefix: {d} bytes", .{payload.len});
+            return;
+        }
+        const msg_len = (@as(usize, payload[0]) << 8) | payload[1];
+        rx_expected_len = msg_len + 2;
+    }
+
+    // Safety guard to avoid buffer overflow
+    if (rx_reassembly_len + payload.len > rx_reassembly_buf.len) {
+        std.log.err("Reassembly buffer overflow! Resetting state.", .{});
+        rx_reassembly_len = 0;
+        rx_expected_len = 0;
         return;
     }
+
+    // Copy fragment into assembly buffer
+    @memcpy(rx_reassembly_buf[rx_reassembly_len .. rx_reassembly_len + payload.len], payload);
+    rx_reassembly_len += payload.len;
+
+    std.log.info("[Firmware] Reassembly progress: {d}/{d} bytes", .{rx_reassembly_len, rx_expected_len});
+
+    // Check if we have gathered the entire packet
+    if (rx_reassembly_len >= rx_expected_len) {
+        const full_message = rx_reassembly_buf[0..rx_reassembly_len];
+        std.log.info("[Firmware] Full packet reassembled ({d} bytes). Processing...", .{rx_reassembly_len});
+
+        // Reset reassembly trackers first to prepare for any synchronous follow-up packets
+        const current_len = rx_reassembly_len;
+        rx_reassembly_len = 0;
+        rx_expected_len = 0;
+
+        processFullRxMessage(full_message[0..current_len]);
+    }
+}
+
+fn processFullRxMessage(payload: []const u8) void {
+    if (payload.len < 2) return;
+    const msg_len = (@as(usize, payload[0]) << 8) | payload[1];
+    if (payload.len < msg_len + 2) return;
 
     const msg_bytes = payload[2..msg_len + 2];
 

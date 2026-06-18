@@ -65,6 +65,7 @@ comptime {
     _ = nimble_layer.tesla_zig_ble_on_connected;
     _ = nimble_layer.tesla_zig_ble_on_disconnected;
     _ = nimble_layer.tesla_zig_ble_on_rx_notification;
+    _ = nimble_layer.tesla_zig_ble_on_channel_ready;
 
     _ = jni_bindings.Java_com_tesla_ble_TeslaClient_init;
     _ = jni_bindings.Java_com_tesla_ble_TeslaClient_buildWakeCommand;

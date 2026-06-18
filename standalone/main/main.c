@@ -1,13 +1,40 @@
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/bignum.h>
+#include <mbedtls/private/bignum.h>
+#include <mbedtls/private/pk_private.h>
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "mqtt_client.h"
 #include "sdkconfig.h"
 #include "esp_random.h"
+
+// Simple Base64 encoder for exactly 32 bytes to Base64
+static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void base64_encode_32(const uint8_t *src, char *dst) {
+    int i = 0;
+    int j = 0;
+    for (i = 0; i < 30; i += 3) {
+        dst[j++] = base64_chars[(src[i] >> 2) & 0x3F];
+        dst[j++] = base64_chars[((src[i] & 0x03) << 4) | ((src[i+1] >> 4) & 0x0F)];
+        dst[j++] = base64_chars[((src[i+1] & 0x0F) << 2) | ((src[i+2] >> 6) & 0x03)];
+        dst[j++] = base64_chars[src[i+2] & 0x3F];
+    }
+    dst[j++] = base64_chars[(src[30] >> 2) & 0x3F];
+    dst[j++] = base64_chars[((src[30] & 0x03) << 4) | ((src[31] >> 4) & 0x0F)];
+    dst[j++] = base64_chars[(src[31] & 0x0F) << 2];
+    dst[j++] = '=';
+    dst[j] = '\0';
+}
 
 // NimBLE BLE Headers
 #include "host/ble_hs.h"
@@ -36,7 +63,8 @@ extern void tesla_zig_app_main(
     const char* broker_pass,
     const char* vin,
     const char* ble_mac,
-    const char* api_key
+    const char* api_key,
+    const char* vehicle_pub_key
 );
 extern void tesla_zig_wifi_on_connected(void);
 extern void tesla_zig_mqtt_on_connected(void);
@@ -45,6 +73,7 @@ extern void tesla_zig_ble_on_vehicle_discovered(const void* ble_addr);
 extern void tesla_zig_ble_on_connected(uint16_t conn_handle);
 extern void tesla_zig_ble_on_disconnected(void);
 extern void tesla_zig_ble_on_rx_notification(const uint8_t* data, int len);
+extern void tesla_zig_ble_on_channel_ready(void);
 
 // Global State
 static esp_mqtt_client_handle_t mqtt_client = NULL;
@@ -198,6 +227,17 @@ static int on_gatt_rx_notify(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static int on_cccd_write(uint16_t conn_handle, const struct ble_gatt_error *error,
+                         struct ble_gatt_attr *attr, void *arg) {
+    if (error->status == 0) {
+        printf("[C BLE] CCCD write completed successfully! Subscribed to notifications.\n");
+        tesla_zig_ble_on_channel_ready();
+    } else {
+        printf("[C BLE] CCCD write failed: status %d\n", error->status);
+    }
+    return 0;
+}
+
 static int on_gatt_disc_desc_rx(uint16_t conn_handle, const struct ble_gatt_error *error,
                                 uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg) {
     if (error->status == BLE_HS_EDONE) {
@@ -212,11 +252,11 @@ static int on_gatt_disc_desc_rx(uint16_t conn_handle, const struct ble_gatt_erro
     if (ble_uuid_cmp(&dsc->uuid.u, BLE_UUID16_DECLARE(BLE_GATT_DSC_CLT_CFG_UUID16)) == 0) {
         // Found CCCD! Write 0x0001 to subscribe to notifications
         uint8_t val[2] = {1, 0};
-        int rc = ble_gattc_write_flat(conn_handle, dsc->handle, val, sizeof(val), NULL, NULL);
+        int rc = ble_gattc_write_flat(conn_handle, dsc->handle, val, sizeof(val), on_cccd_write, NULL);
         if (rc != 0) {
             printf("[C BLE] Failed to write CCCD descriptor: %d\n", rc);
         } else {
-            printf("[C BLE] Successfully subscribed to RX notifications.\n");
+            printf("[C BLE] Successfully initiated CCCD write.\n");
         }
     }
     return 0;
@@ -355,6 +395,14 @@ static int on_gap_event(struct ble_gap_event *event, void *arg) {
             tesla_zig_ble_on_disconnected();
             break;
         }
+        case BLE_GAP_EVENT_NOTIFY_RX: {
+            if (event->notify_rx.attr_handle == gatt_rx_char_val_handle) {
+                on_gatt_rx_notify(event->notify_rx.conn_handle,
+                                  event->notify_rx.attr_handle,
+                                  &event->notify_rx.om, NULL);
+            }
+            break;
+        }
     }
     return 0;
 }
@@ -432,6 +480,65 @@ void app_main(void) {
     esp_netif_init();
     esp_event_loop_create_default();
 
+    // Check for registered/whitelisted private key in NVS "storage" namespace
+    char nvs_b64_key[45] = {0};
+    const char *api_key_to_use = CONFIG_API_ENCRYPTION_KEY;
+    
+    nvs_handle_t my_handle;
+    esp_err_t nvs_err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (nvs_err == ESP_OK) {
+        size_t required_private_key_size = 0;
+        nvs_err = nvs_get_blob(my_handle, "private_key", NULL, &required_private_key_size);
+        if (nvs_err == ESP_OK && required_private_key_size > 0) {
+            printf("[C System] Found real whitelisted private key blob in NVS 'storage' (size=%d bytes).\n", (int)required_private_key_size);
+            unsigned char *private_key_buffer = malloc(required_private_key_size + 1);
+            if (private_key_buffer != NULL) {
+                nvs_err = nvs_get_blob(my_handle, "private_key", private_key_buffer, &required_private_key_size);
+                if (nvs_err == ESP_OK) {
+                    private_key_buffer[required_private_key_size] = '\0'; // Null-terminate for PEM format
+                    
+                    mbedtls_pk_context pk_ctx;
+                    mbedtls_pk_init(&pk_ctx);
+                    int parse_rc = mbedtls_pk_parse_key(&pk_ctx, private_key_buffer, required_private_key_size + 1, NULL, 0);
+                    if (parse_rc == 0) {
+                        mbedtls_ecp_keypair *ecp = mbedtls_pk_ec(pk_ctx);
+                        if (ecp != NULL) {
+                            uint8_t raw_key[32];
+                            int mpi_rc = mbedtls_mpi_write_binary(&ecp->d, raw_key, 32);
+                            if (mpi_rc == 0) {
+                                printf("[C System] Successfully extracted raw 32-byte SEC1 private key from mbedtls ECP keypair!\n");
+                                base64_encode_32(raw_key, nvs_b64_key);
+                                printf("[C System] NVS Base64 Key: %s\n", nvs_b64_key);
+                                api_key_to_use = nvs_b64_key;
+                            } else {
+                                printf("[C System] Failed to write binary from mbedtls MPI (rc=%d)\n", mpi_rc);
+                            }
+                        } else {
+                            printf("[C System] Failed to get ECP keypair context from parsed PK context.\n");
+                        }
+                    } else {
+                        printf("[C System] mbedtls_pk_parse_key failed with error -0x%04x. Trying raw 32-byte parse...\n", -parse_rc);
+                        if (required_private_key_size == 32) {
+                            printf("[C System] Fallback: parsed directly as raw 32-byte key.\n");
+                            base64_encode_32(private_key_buffer, nvs_b64_key);
+                            printf("[C System] NVS Base64 Key: %s\n", nvs_b64_key);
+                            api_key_to_use = nvs_b64_key;
+                        }
+                    }
+                    mbedtls_pk_free(&pk_ctx);
+                } else {
+                    printf("[C System] Failed to read private key blob bytes from NVS storage.\n");
+                }
+                free(private_key_buffer);
+            }
+        } else {
+            printf("[C System] No private_key blob found in NVS 'storage' (err=%d, len=%d). Using default config key.\n", nvs_err, (int)required_private_key_size);
+        }
+        nvs_close(my_handle);
+    } else {
+        printf("[C System] Failed to open NVS namespace 'storage' (err=%d). Using default config key.\n", nvs_err);
+    }
+
     // Launch the core Zig-native application thread
     printf("[C System] Handing over execution thread to Zig...\n");
     tesla_zig_app_main(
@@ -442,6 +549,7 @@ void app_main(void) {
         CONFIG_MQTT_PASSWORD,
         CONFIG_VEHICLE_VIN,
         CONFIG_BLE_MAC_ADDRESS,
-        CONFIG_API_ENCRYPTION_KEY
+        api_key_to_use,
+        CONFIG_VEHICLE_PUBLIC_KEY
     );
 }

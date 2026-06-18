@@ -48,6 +48,13 @@ pub export fn tesla_zig_ble_on_connected(conn_handle: u16) callconv(.c) void {
     const firmware = @import("firmware.zig");
     if (firmware.is_initialized) {
         firmware.client_inst.handleBleConnected(firmware.getMillis());
+    }
+}
+
+pub export fn tesla_zig_ble_on_channel_ready() callconv(.c) void {
+    std.log.info("[BLE callback] GATT channel ready! Initiating handshake...", .{});
+    const firmware = @import("firmware.zig");
+    if (firmware.is_initialized) {
         firmware.sendHandshakeRequest(.vehicle_security);
     }
 }

@@ -15,4 +15,5 @@ esphome/*.a
 # ESP-IDF standalone build artifacts
 standalone/build/
 standalone/sdkconfig
+standalone/sdkconfig.defaults.local
 standalone/managed_components/

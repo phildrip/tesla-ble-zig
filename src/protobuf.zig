@@ -223,15 +223,57 @@ pub const SessionInfo = struct {
                     self.public_key_len = bytes.len;
                 },
                 3 => {
-                    const len = try reader.readVarint();
-                    const bytes = try reader.readBytes(len);
-                    if (bytes.len > 16) return error.EpochTooLong;
-                    @memcpy(self.epoch[0..bytes.len], bytes);
-                    self.epoch_len = bytes.len;
+                    if (tag.wire_type == 2) {
+                        const len = try reader.readVarint();
+                        const bytes = try reader.readBytes(len);
+                        if (bytes.len > 16) return error.EpochTooLong;
+                        @memcpy(self.epoch[0..bytes.len], bytes);
+                        self.epoch_len = bytes.len;
+                    } else if (tag.wire_type == 0) {
+                        const val = try reader.readVarint();
+                        var temp: [10]u8 = undefined;
+                        var idx: usize = 0;
+                        var temp_val = val;
+                        while (temp_val >= 0x80) {
+                            temp[idx] = @intCast((temp_val & 0x7F) | 0x80);
+                            temp_val >>= 7;
+                            idx += 1;
+                        }
+                        temp[idx] = @intCast(temp_val);
+                        idx += 1;
+                        const bytes = temp[0..idx];
+                        if (bytes.len > 16) return error.EpochTooLong;
+                        @memcpy(self.epoch[0..bytes.len], bytes);
+                        self.epoch_len = bytes.len;
+                    } else {
+                        try reader.skipValue(tag.wire_type);
+                    }
                 },
                 4 => {
-                    const bytes = try reader.readBytes(4);
-                    self.clock_time = std.mem.readInt(u32, bytes[0..4], .little);
+                    if (tag.wire_type == 5) {
+                        const bytes = try reader.readBytes(4);
+                        self.clock_time = std.mem.readInt(u32, bytes[0..4], .little);
+                    } else if (tag.wire_type == 0) {
+                        self.clock_time = @intCast(try reader.readVarint());
+                    } else if (tag.wire_type == 2) {
+                        const len = try reader.readVarint();
+                        const bytes = try reader.readBytes(len);
+                        var val: u32 = 0;
+                        if (bytes.len > 0) {
+                            if (bytes.len == 4) {
+                                val = std.mem.readInt(u32, bytes[0..4], .little);
+                            } else {
+                                var shift: u5 = 0;
+                                for (bytes) |b| {
+                                    val |= @as(u32, b) << shift;
+                                    shift +%= 8;
+                                }
+                            }
+                        }
+                        self.clock_time = val;
+                    } else {
+                        try reader.skipValue(tag.wire_type);
+                    }
                 },
                 5 => {
                     self.status = @intCast(try reader.readVarint());
@@ -333,7 +375,7 @@ pub const DecodedRoutableMessage = struct {
                     const len = try reader.readVarint();
                     self.protobuf_message_as_bytes = try reader.readBytes(len);
                 },
-                15 => { // session_info (payload bytes)
+                3, 15 => { // session_info (payload bytes in some vehicle protocol versions)
                     const len = try reader.readVarint();
                     self.session_info = try reader.readBytes(len);
                 },
@@ -464,5 +506,31 @@ test "UnsignedMessage Serialization" {
         // Length of sub-message = 4 bytes: [0x28, 0x01, 0x30, 0x01]
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0x22, 0x04, 0x28, 0x01, 0x30, 0x01 }, written);
     }
+}
+
+test "Vehicle SessionInfo Response decoding" {
+    // 31-byte payload: 1a 1d 12 16 0a 14 d6 4c a5 77 03 55 b2 a2 34 8c 58 8f 19 69 d3 62 38 bc 02 5f 18 02 22 01 01
+    const raw_payload = [_]u8{
+        0x1a, 0x1d, 0x12, 0x16, 0x0a, 0x14, 0xd6, 0x4c, 0xa5, 0x77,
+        0x03, 0x55, 0xb2, 0xa2, 0x34, 0x8c, 0x58, 0x8f, 0x19, 0x69,
+        0xd3, 0x62, 0x38, 0xbc, 0x02, 0x5f, 0x18, 0x02, 0x22, 0x01,
+        0x01,
+    };
+
+    // First, let's decode it as DecodedRoutableMessage.
+    // It should contain session_info on Field 3.
+    const decoded = try DecodedRoutableMessage.decode(&raw_payload);
+    try std.testing.expect(decoded.session_info != null);
+
+    const si_bytes = decoded.session_info.?;
+    try std.testing.expectEqual(@as(usize, 29), si_bytes.len);
+
+    // Let's decode the inner SessionInfo
+    const info = try SessionInfo.decode(si_bytes);
+    
+    // Let's print the decoded fields for debugging
+    std.debug.print("Decoded SessionInfo status: {d}\n", .{info.status});
+    std.debug.print("Decoded SessionInfo public_key_len: {d}\n", .{info.public_key_len});
+    std.debug.print("Decoded SessionInfo counter: {d}\n", .{info.counter});
 }
 

@@ -54,6 +54,12 @@ menu "Tesla BLE Firmware Configuration"
         help
             The API encryption key for secure pairing and communications.
 
+    config VEHICLE_PUBLIC_KEY
+        string "Vehicle Static Public Key"
+        default ""
+        help
+            The target vehicle's uncompressed 65-byte static public key as a 130-character hex string.
+
     config OTA_PASSWORD
         string "OTA Password"
         default "ota_placeholder"
@@ -61,4 +67,5 @@ menu "Tesla BLE Firmware Configuration"
             The password for Over-The-Air updates.
 
 endmenu
+
 

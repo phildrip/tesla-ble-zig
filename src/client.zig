@@ -14,6 +14,8 @@ pub const Client = struct {
     last_request_hash: [17]u8,
     last_request_hash_len: usize,
     csm: csm.ConnectionStateMachine,
+    vehicle_public_key: [65]u8,
+    has_vehicle_public_key: bool,
 
     /// Create a new Tesla BLE Client with a specified VIN and connection ID.
     /// If private_key_bytes is provided, loads the existing identity.
@@ -32,7 +34,14 @@ pub const Client = struct {
             .last_request_hash = [_]u8{0} ** 17,
             .last_request_hash_len = 0,
             .csm = csm.ConnectionStateMachine.init(),
+            .vehicle_public_key = [_]u8{0} ** 65,
+            .has_vehicle_public_key = false,
         };
+    }
+
+    pub fn setVehiclePublicKey(self: *Client, pub_key: [65]u8) void {
+        self.vehicle_public_key = pub_key;
+        self.has_vehicle_public_key = (pub_key[0] == 0x04);
     }
 
     /// Retrieve the correct Session Peer based on the target message domain.
@@ -227,6 +236,18 @@ pub const Client = struct {
         return try insertLength(payload_len, output);
     }
 
+    fn logHex(prefix: []const u8, bytes: []const u8) void {
+        var buf: [128]u8 = undefined;
+        const hex_chars = "0123456789abcdef";
+        var i: usize = 0;
+        const max_len = @min(bytes.len, 64);
+        while (i < max_len) : (i += 1) {
+            buf[i * 2] = hex_chars[bytes[i] >> 4];
+            buf[i * 2 + 1] = hex_chars[bytes[i] & 0x0f];
+        }
+        std.log.info("{s}{s}", .{ prefix, buf[0 .. max_len * 2] });
+    }
+
     /// Process received handshake payload and update local session secret vectors.
     pub fn handleSessionInfoResponse(
         self: *Client,
@@ -242,12 +263,72 @@ pub const Client = struct {
             return error.KeyNotOnWhitelist;
         }
 
+        var resolved_pub_key = info.public_key;
+        if (info.public_key_len == 22 or info.public_key_len == 20) {
+            const key_id = if (info.public_key_len == 22)
+                info.public_key[2..22]
+            else
+                info.public_key[0..20];
+
+            logHex("[Client] Received short public key ID in SessionInfo: ", key_id);
+
+            if (self.has_vehicle_public_key) {
+                var matches = false;
+                
+                // 1. Check if matches first 20 bytes of the uncompressed public key excluding the 0x04 prefix (X-coordinate prefix)
+                if (std.mem.eql(u8, key_id, self.vehicle_public_key[1..21])) {
+                    matches = true;
+                }
+                
+                // 2. Check if matches first 20 bytes including the 0x04 prefix
+                if (!matches and std.mem.eql(u8, key_id, self.vehicle_public_key[0..20])) {
+                    matches = true;
+                }
+                
+                // 3. Check if matches the 20-byte SHA-1 hash of the vehicle public key
+                var sha1_out: [20]u8 = undefined;
+                std.crypto.hash.Sha1.hash(&self.vehicle_public_key, &sha1_out, .{});
+                if (!matches and std.mem.eql(u8, key_id, &sha1_out)) {
+                    matches = true;
+                }
+
+                // 4. Check if matches the 20-byte SHA-1 hash of the client public key
+                var client_sha1: [20]u8 = undefined;
+                std.crypto.hash.Sha1.hash(&self.key_pair.public_key, &client_sha1, .{});
+                if (!matches and std.mem.eql(u8, key_id, &client_sha1)) {
+                    matches = true;
+                }
+
+                // 5. Check if matches client public key X-prefix or uncompressed prefix
+                if (!matches and std.mem.eql(u8, key_id, self.key_pair.public_key[1..21])) {
+                    matches = true;
+                }
+                if (!matches and std.mem.eql(u8, key_id, self.key_pair.public_key[0..20])) {
+                    matches = true;
+                }
+                
+                if (matches) {
+                    std.log.info("[Client] Successfully matched public key ID (vehicle or client). Substituting full 65-byte vehicle public key.", .{});
+                    resolved_pub_key = self.vehicle_public_key;
+                } else {
+                    std.log.warn("[Client] WARNING: Short key ID does not match our configured static vehicle public key or our client public key!", .{});
+                    logHex("[Client] Configured Vehicle key SHA-1: ", &sha1_out);
+                    logHex("[Client] Configured Client key SHA-1: ", &client_sha1);
+                    std.log.info("[Client] Robust Mode: Proceeding anyway and substituting full 65-byte vehicle public key.", .{});
+                    resolved_pub_key = self.vehicle_public_key;
+                }
+            } else {
+                std.log.err("[Client] Received short public key ID, but no static vehicle public key has been configured!", .{});
+                return error.KeyNotOnWhitelist;
+            }
+        }
+
         active_sess.updateSession(
             info.epoch,
             info.counter,
             info.clock_time,
             current_timestamp,
-            info.public_key,
+            resolved_pub_key,
             self.key_pair.private_key,
         ) catch |err| {
             self.csm.handleEvent(.handshake_failed, current_timestamp);
