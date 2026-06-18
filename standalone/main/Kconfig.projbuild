@@ -1,0 +1,27 @@
+menu "Tesla BLE Firmware Configuration"
+
+    config WIFI_SSID
+        string "Wi-Fi SSID"
+        default "Tesla_BLE_Control"
+        help
+            The SSID (name) of your Wi-Fi network.
+
+    config WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default "secure_password"
+        help
+            The password of your Wi-Fi network.
+
+    config MQTT_BROKER_URL
+        string "MQTT Broker URL"
+        default "mqtt://homeassistant.local:1883"
+        help
+            The Home Assistant MQTT broker URL (e.g., mqtt://homeassistant.local:1883).
+
+    config VEHICLE_VIN
+        string "Tesla Vehicle VIN"
+        default "5YJ3E1EBXLFXXXXXX"
+        help
+            The VIN of your Tesla vehicle to identify topics and autodiscovery entities.
+
+endmenu
