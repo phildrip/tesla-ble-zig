@@ -53,22 +53,22 @@ static uint16_t gatt_tx_char_val_handle = 0;
 static uint16_t gatt_rx_char_val_handle = 0;
 
 // Tesla Secure UUID definitions
-// Service: 00000211-0000-1000-8000-00805f9b34fb
-// Tx Char:  00000212-0000-1000-8000-00805f9b34fb
-// Rx Char:  00000213-0000-1000-8000-00805f9b34fb
+// Service: 00000211-b2d1-43f0-9b88-960cebf8b91e
+// Tx Char:  00000212-b2d1-43f0-9b88-960cebf8b91e
+// Rx Char:  00000213-b2d1-43f0-9b88-960cebf8b91e
 static const ble_uuid128_t tesla_svc_uuid = BLE_UUID128_INIT(
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0x11, 0x02, 0x00, 0x00
+    0x1e, 0xb9, 0xf8, 0xeb, 0x0c, 0x96, 0x88, 0x9b,
+    0xf0, 0x43, 0xd1, 0xb2, 0x11, 0x02, 0x00, 0x00
 );
 
 static const ble_uuid128_t tesla_tx_char_uuid = BLE_UUID128_INIT(
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0x12, 0x02, 0x00, 0x00
+    0x1e, 0xb9, 0xf8, 0xeb, 0x0c, 0x96, 0x88, 0x9b,
+    0xf0, 0x43, 0xd1, 0xb2, 0x12, 0x02, 0x00, 0x00
 );
 
 static const ble_uuid128_t tesla_rx_char_uuid = BLE_UUID128_INIT(
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0x13, 0x02, 0x00, 0x00
+    0x1e, 0xb9, 0xf8, 0xeb, 0x0c, 0x96, 0x88, 0x9b,
+    0xf0, 0x43, 0xd1, 0xb2, 0x13, 0x02, 0x00, 0x00
 );
 
 // -------------------------------------------------------------
@@ -281,46 +281,54 @@ static bool parse_mac_address(const char* str, uint8_t* mac) {
 static int on_gap_event(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
         case BLE_GAP_EVENT_DISC: {
-            struct ble_hs_adv_fields fields;
-            int rc = ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data);
-            if (rc == 0) {
-                bool found = false;
-                for (int i = 0; i < fields.num_uuids16; i++) {
-                    if (fields.uuids16[i].value == 0x0211) {
-                        found = true; break;
+            bool is_match = false;
+            if (has_target_ble_mac) {
+                bool match_forward = true;
+                bool match_reverse = true;
+                for (int i = 0; i < 6; i++) {
+                    if (event->disc.addr.val[i] != target_ble_mac[i]) {
+                        match_forward = false;
+                    }
+                    if (event->disc.addr.val[i] != target_ble_mac[5 - i]) {
+                        match_reverse = false;
                     }
                 }
-                if (!found && fields.uuids128 != NULL) {
-                    for (int i = 0; i < fields.num_uuids128; i++) {
-                        const uint8_t *u = fields.uuids128[i].value;
-                        if (u[12] == 0x11 && u[13] == 0x02) {
+                if (match_forward || match_reverse) {
+                    is_match = true;
+                }
+            } else {
+                struct ble_hs_adv_fields fields;
+                int rc = ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data);
+                if (rc == 0) {
+                    bool found = false;
+                    for (int i = 0; i < fields.num_uuids16; i++) {
+                        if (fields.uuids16[i].value == 0x0211) {
                             found = true; break;
                         }
                     }
-                }
-
-                if (found) {
-                    bool mac_match = true;
-                    if (has_target_ble_mac) {
-                        bool match_forward = true;
-                        bool match_reverse = true;
-                        for (int i = 0; i < 6; i++) {
-                            if (event->disc.addr.val[i] != target_ble_mac[i]) {
-                                match_forward = false;
-                            }
-                            if (event->disc.addr.val[i] != target_ble_mac[5 - i]) {
-                                match_reverse = false;
+                    if (!found && fields.uuids128 != NULL) {
+                        for (int i = 0; i < fields.num_uuids128; i++) {
+                            const uint8_t *u = fields.uuids128[i].value;
+                            if (u[12] == 0x11 && u[13] == 0x02) {
+                                found = true; break;
                             }
                         }
-                        mac_match = match_forward || match_reverse;
                     }
-
-                    if (mac_match) {
-                        printf("[C BLE] Tesla vehicle discovered! Stopping scan and notifying Zig...\n");
-                        ble_gap_disc_cancel();
-                        tesla_zig_ble_on_vehicle_discovered(&event->disc.addr);
+                    if (!found && fields.name != NULL && fields.name_len > 1) {
+                        if (fields.name[0] == 'S' && fields.name[fields.name_len - 1] == 'C') {
+                            found = true;
+                        }
+                    }
+                    if (found) {
+                        is_match = true;
                     }
                 }
+            }
+
+            if (is_match) {
+                printf("[C BLE] Tesla vehicle discovered! Stopping scan and notifying Zig...\n");
+                ble_gap_disc_cancel();
+                tesla_zig_ble_on_vehicle_discovered(&event->disc.addr);
             }
             break;
         }

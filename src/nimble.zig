@@ -11,9 +11,9 @@ extern fn tesla_c_ble_connect(addr: *const anyopaque) void;
 extern fn tesla_c_ble_write_tx(conn_handle: u16, data: [*]const u8, len: usize) void;
 
 // Tesla Service UUID definitions
-pub const TESLA_SERVICE_UUID128 = "00000211-0000-1000-8000-00805f9b34fb";
-pub const TESLA_CHAR_TX_UUID128  = "00000212-0000-1000-8000-00805f9b34fb";
-pub const TESLA_CHAR_RX_UUID128  = "00000213-0000-1000-8000-00805f9b34fb";
+pub const TESLA_SERVICE_UUID128 = "00000211-b2d1-43f0-9b88-960cebf8b91e";
+pub const TESLA_CHAR_TX_UUID128  = "00000212-b2d1-43f0-9b88-960cebf8b91e";
+pub const TESLA_CHAR_RX_UUID128  = "00000213-b2d1-43f0-9b88-960cebf8b91e";
 
 var target_conn_handle: u16 = 0;
 
