@@ -8,10 +8,10 @@ pub const KeyPair = struct {
     private_key: [32]u8,
     public_key: [65]u8,
 
-    /// Generate a new, secure P256 KeyPair using the provided system standard I/O engine.
-    pub fn generate(io: std.Io) !KeyPair {
-        // Generate a random scalar directly from standard secure Io
-        const scalar = P256.scalar.random(io, .big);
+    /// Generate a new, secure P256 KeyPair using the provided system standard Random engine.
+    pub fn generate(random: std.Random) !KeyPair {
+        // Generate a random scalar directly from standard secure Random
+        const scalar = P256.scalar.random(random, .big);
         
         // Multiply the basePoint by the scalar to get the public point
         const public_point = try P256.basePoint.mul(scalar, .big);

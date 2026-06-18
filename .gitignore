@@ -11,3 +11,8 @@ esphome/*.bin
 esphome/*.elf
 esphome/*.a
 *.a
+
+# ESP-IDF standalone build artifacts
+standalone/build/
+standalone/sdkconfig
+standalone/managed_components/

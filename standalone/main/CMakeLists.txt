@@ -8,8 +8,17 @@ set(ZIG_LIB_PATH "${ZIG_OUT_DIR}/lib/libtesla_ble_zig.a")
 
 add_custom_command(
     OUTPUT "${ZIG_LIB_PATH}"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${ZIG_OUT_DIR}"
     COMMAND zig build -p "${ZIG_OUT_DIR}" -Dtarget=riscv32-freestanding-none -Dcpu=baseline_rv32-f-d -Doptimize=ReleaseSmall
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/firmware.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/nimble.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/client.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/queue.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/csm.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/jni_bindings.zig"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../build.zig"
     COMMENT "Compiling pure-Zig static library for ESP32-C6..."
 )
 

@@ -89,19 +89,19 @@ monitor-standalone:
 deploy-standalone:
 	@echo "Deploying complete workspace to remote host $(REMOTE_HOST)..."
 	ssh -o BatchMode=yes $(REMOTE_HOST) "mkdir -p $(REMOTE_STANDALONE_DIR)"
-	scp -r CMakeLists.txt build.zig build.zig.zon Makefile src include standalone $(REMOTE_HOST):$(REMOTE_STANDALONE_DIR)/
+	scp -r build.zig build.zig.zon Makefile src include standalone $(REMOTE_HOST):$(REMOTE_STANDALONE_DIR)/
 
 compile-remote-standalone: deploy-standalone
 	@echo "Compiling standalone firmware on remote host $(REMOTE_HOST)..."
-	ssh -o BatchMode=yes $(REMOTE_HOST) "cd $(REMOTE_STANDALONE_DIR)/standalone && . ~/.bashrc && idf.py build"
+	ssh -o BatchMode=yes $(REMOTE_HOST) 'bash -c "source ~/git/esp-idf/export.sh && cd $(REMOTE_STANDALONE_DIR)/standalone && idf.py build"'
 
 flash-remote-standalone:
 	@echo "Flashing standalone firmware on remote host $(REMOTE_HOST) to $(REMOTE_PORT)..."
-	ssh -o BatchMode=yes $(REMOTE_HOST) "cd $(REMOTE_STANDALONE_DIR)/standalone && . ~/.bashrc && idf.py -p $(REMOTE_PORT) flash"
+	ssh -o BatchMode=yes $(REMOTE_HOST) 'bash -c "source ~/git/esp-idf/export.sh && cd $(REMOTE_STANDALONE_DIR)/standalone && idf.py -p $(REMOTE_PORT) flash"'
 
 monitor-remote-standalone:
 	@echo "Monitoring standalone logs on remote host $(REMOTE_HOST) on $(REMOTE_PORT)..."
-	ssh -o BatchMode=yes $(REMOTE_HOST) -t "cd $(REMOTE_STANDALONE_DIR)/standalone && . ~/.bashrc && idf.py -p $(REMOTE_PORT) monitor"
+	ssh -o BatchMode=yes $(REMOTE_HOST) -t 'bash -c "source ~/git/esp-idf/export.sh && cd $(REMOTE_STANDALONE_DIR)/standalone && idf.py -p $(REMOTE_PORT) monitor"'
 
 clean:
 	@echo "Cleaning local build artifacts..."

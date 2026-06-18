@@ -236,4 +236,21 @@ pub fn build(b: *std.Build) void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
     }
+
+    // -------------------------------------------------------------
+    // Standalone ESP-IDF targets (run from any host environment)
+    // -------------------------------------------------------------
+    const standalone_step = b.step("standalone", "Build the complete bootable standalone ESP-IDF firmware");
+    const flash_step = b.step("flash", "Flash the standalone firmware to the physical device");
+    const monitor_step = b.step("monitor", "Open the serial monitor for the physical device");
+
+    const idf_build = b.addSystemCommand(&.{ "idf.py", "-C", "standalone", "build" });
+    standalone_step.dependOn(&idf_build.step);
+
+    const idf_flash = b.addSystemCommand(&.{ "idf.py", "-C", "standalone", "flash" });
+    idf_flash.step.dependOn(&idf_build.step);
+    flash_step.dependOn(&idf_flash.step);
+
+    const idf_monitor = b.addSystemCommand(&.{ "idf.py", "-C", "standalone", "monitor" });
+    monitor_step.dependOn(&idf_monitor.step);
 }

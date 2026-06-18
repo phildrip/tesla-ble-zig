@@ -12,11 +12,29 @@ menu "Tesla BLE Firmware Configuration"
         help
             The password of your Wi-Fi network.
 
+    config WIFI_HOTSPOT_PASSWORD
+        string "Wi-Fi Hotspot Password"
+        default "tesla-ble-setup"
+        help
+            The password for the fallback Wi-Fi hotspot.
+
     config MQTT_BROKER_URL
         string "MQTT Broker URL"
         default "mqtt://homeassistant.local:1883"
         help
             The Home Assistant MQTT broker URL (e.g., mqtt://homeassistant.local:1883).
+
+    config MQTT_USERNAME
+        string "MQTT Username"
+        default ""
+        help
+            The username for the MQTT broker (optional).
+
+    config MQTT_PASSWORD
+        string "MQTT Password"
+        default ""
+        help
+            The password for the MQTT broker (optional).
 
     config VEHICLE_VIN
         string "Tesla Vehicle VIN"
@@ -24,4 +42,23 @@ menu "Tesla BLE Firmware Configuration"
         help
             The VIN of your Tesla vehicle to identify topics and autodiscovery entities.
 
+    config BLE_MAC_ADDRESS
+        string "Target Tesla BLE MAC Address"
+        default ""
+        help
+            The MAC address of the target Tesla vehicle (e.g., 74:46:B3:04:47:16). If empty, scans for any Tesla.
+
+    config API_ENCRYPTION_KEY
+        string "API Encryption Key"
+        default ""
+        help
+            The API encryption key for secure pairing and communications.
+
+    config OTA_PASSWORD
+        string "OTA Password"
+        default "ota_placeholder"
+        help
+            The password for Over-The-Air updates.
+
 endmenu
+

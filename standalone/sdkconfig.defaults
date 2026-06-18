@@ -10,12 +10,20 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
 # Memory and Partition sizes
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
 # Wi-Fi configurations
 CONFIG_ESP_WIFI_ENABLED=y
 
 # Custom Tesla BLE Configuration Defaults
-CONFIG_WIFI_SSID="GIGANET_QHYJO4"
-CONFIG_WIFI_PASSWORD="ridden-simply-submersed"
+CONFIG_WIFI_SSID="your_wifi_ssid"
+CONFIG_WIFI_PASSWORD="your_wifi_password"
+CONFIG_WIFI_HOTSPOT_PASSWORD="tesla-ble-setup"
 CONFIG_MQTT_BROKER_URL="mqtt://homeassistant.local:1883"
-CONFIG_VEHICLE_VIN="LRWYHCEK8PC729294"
+CONFIG_MQTT_USERNAME="your_mqtt_username"
+CONFIG_MQTT_PASSWORD="your_mqtt_password"
+CONFIG_VEHICLE_VIN="your_vehicle_vin"
+CONFIG_BLE_MAC_ADDRESS="your_ble_mac_address"
+CONFIG_API_ENCRYPTION_KEY="your_api_encryption_key_base64"
+CONFIG_OTA_PASSWORD="your_ota_password"
+

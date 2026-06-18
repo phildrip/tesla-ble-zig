@@ -3,223 +3,367 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-
-// Conditional imports for freestanding ESP-IDF targets vs native testing
-const esp = if (builtin.os.tag == .freestanding) @cImport({
-    @cInclude("esp_wifi.h");
-    @cInclude("esp_event.h");
-    @cInclude("esp_netif.h");
-    @cInclude("nvs_flash.h");
-    @cInclude("mqtt_client.h");
-    @cInclude("sdkconfig.h"); // For configuration settings!
-}) else struct {
-    // Mocks for local target compiler testing
-    pub const esp_err_t = i32;
-    pub const ESP_OK = 0;
-    pub const esp_mqtt_client_handle_t = ?*anyopaque;
-    pub const esp_mqtt_event_handle_t = ?*anyopaque;
-};
-
 const nimble_layer = @import("nimble.zig");
 const client_module = @import("client.zig");
 const queue_module = @import("queue.zig");
 
-// Static configuration (loaded from sdkconfig if available, falling back to defaults)
-const WIFI_SSID = if (builtin.os.tag == .freestanding and @hasDecl(esp, "CONFIG_WIFI_SSID")) esp.CONFIG_WIFI_SSID else "Tesla_BLE_Control";
-const WIFI_PASS = if (builtin.os.tag == .freestanding and @hasDecl(esp, "CONFIG_WIFI_PASSWORD")) esp.CONFIG_WIFI_PASSWORD else "secure_password";
-const MQTT_BROKER_URL = if (builtin.os.tag == .freestanding and @hasDecl(esp, "CONFIG_MQTT_BROKER_URL")) esp.CONFIG_MQTT_BROKER_URL else "mqtt://homeassistant.local:1883";
-const VEHICLE_VIN = if (builtin.os.tag == .freestanding and @hasDecl(esp, "CONFIG_VEHICLE_VIN")) esp.CONFIG_VEHICLE_VIN else "5YJ3E1EBXLFXXXXXX";
+// Extern functions to invoke ESP-IDF C wrappers (defined in main.c)
+extern fn tesla_c_wifi_init(ssid: [*:0]const u8, password: [*:0]const u8) void;
+extern fn tesla_c_mqtt_init(broker_url: [*:0]const u8) void;
+extern fn tesla_c_mqtt_publish(topic: [*:0]const u8, payload: [*]const u8, len: usize, qos: i32, retain: i32) void;
+extern fn tesla_c_mqtt_subscribe(topic: [*:0]const u8, qos: i32) void;
+extern fn esp_timer_get_time() callconv(.c) i64;
 
-var mqtt_client: esp.esp_mqtt_client_handle_t = null;
+// Global configuration loaded at startup passed from C app_main
+var wifi_ssid: [*:0]const u8 = undefined;
+var wifi_pass: [*:0]const u8 = undefined;
+var mqtt_broker_url: [*:0]const u8 = undefined;
+var mqtt_broker_user: [*:0]const u8 = undefined;
+var mqtt_broker_pass: [*:0]const u8 = undefined;
+var vehicle_vin: [*:0]const u8 = undefined;
+var ble_mac_address: [*:0]const u8 = undefined;
+var api_encryption_key: [*:0]const u8 = undefined;
+
+// Active global Client and CommandQueue structures
+pub var client_inst: client_module.Client = undefined;
+pub var queue_inst: queue_module.CommandQueue = undefined;
+pub var is_initialized: bool = false;
+
+/// Get system millisecond timestamp in a platform-agnostic manner.
+pub fn getMillis() u32 {
+    if (builtin.os.tag == .freestanding) {
+        return @intCast(@divTrunc(esp_timer_get_time(), 1000));
+    } else {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+        const ms = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(@divTrunc(ts.nsec, 1_000_000)));
+        return @truncate(ms);
+    }
+}
 
 // Pure-Zig global entry-point callable from ESP-IDF bootloader.
-pub export fn app_main() callconv(.c) void {
+pub export fn tesla_zig_app_main(
+    ssid: [*:0]const u8,
+    password: [*:0]const u8,
+    broker_url: [*:0]const u8,
+    broker_user: [*:0]const u8,
+    broker_pass: [*:0]const u8,
+    vin: [*:0]const u8,
+    ble_mac: [*:0]const u8,
+    api_key: [*:0]const u8,
+) callconv(.c) void {
     std.log.info("🚗 Starting Pure-Zig Standalone Tesla BLE Firmware...", .{});
 
+    wifi_ssid = ssid;
+    wifi_pass = password;
+    mqtt_broker_url = broker_url;
+    mqtt_broker_user = broker_user;
+    mqtt_broker_pass = broker_pass;
+    vehicle_vin = vin;
+    ble_mac_address = ble_mac;
+    api_encryption_key = api_key;
+
+    std.log.info("[System] Initialized config SSID: {s}, Broker: {s}, User: {s}, VIN: {s}, MAC: {s}", .{
+        wifi_ssid,
+        mqtt_broker_url,
+        mqtt_broker_user,
+        vehicle_vin,
+        ble_mac_address,
+    });
+
+    // Parse the Base64 API encryption key (which is our private key)
+    var decoded_priv_key: [32]u8 = undefined;
+    const key_len = std.mem.span(api_encryption_key);
+    var decoded = true;
+    std.base64.standard.Decoder.decode(&decoded_priv_key, key_len) catch |err| {
+        std.log.err("Failed to decode base64 api_key: {any}. Using fallback.", .{err});
+        @memcpy(&decoded_priv_key, &[_]u8{5} ** 32);
+        decoded = false;
+    };
+
+    const dummy_conn_id = [_]u8{0x88} ** 16;
+    const vin_slice = std.mem.span(vehicle_vin);
+    client_inst = client_module.Client.init(vin_slice, decoded_priv_key, dummy_conn_id) catch |err| {
+        std.log.err("Failed to initialize Client: {any}", .{err});
+        return;
+    };
+    queue_inst = queue_module.CommandQueue.init();
+    is_initialized = true;
+
+    std.log.info("Client and CommandQueue initialized successfully. PrivKey Decoded={any}.", .{decoded});
+
     if (builtin.os.tag == .freestanding) {
-        // 1. Initialize NVS Flash
-        var err = esp.nvs_flash_init();
-        if (err == 100) { // ESP_ERR_NVS_NO_FREE_PAGES
-            _ = esp.nvs_flash_erase();
-            err = esp.nvs_flash_init();
-        }
-        std.log.info("[System] NVS initialized with status: {d}", .{err});
+        // 1. Connect to Wi-Fi
+        tesla_c_wifi_init(wifi_ssid, wifi_pass);
 
-        // 2. Initialize TCP/IP and Network Interface
-        _ = esp.esp_netif_init();
-        _ = esp.esp_event_loop_create_default();
-        std.log.info("[Network] TCP/IP netif stack running", .{});
+        // 2. Connect to MQTT Broker
+        tesla_c_mqtt_init(mqtt_broker_url);
 
-        // 3. Connect to Wi-Fi
-        initWifi();
-
-        // 4. Connect to MQTT Broker & Register Auto-Discovery Entities
-        initMqtt();
-
-        // 5. Initialize NimBLE Controller and Start scanning
+        // 3. Initialize NimBLE Controller and Start scanning
         nimble_layer.initNimble();
     } else {
         std.log.info("[Mock] Running in native test mode. Wi-Fi, MQTT, and BLE simulated.", .{});
     }
 }
 
-// Initialize and start the Wi-Fi client station.
-fn initWifi() void {
-    if (builtin.os.tag != .freestanding) return;
+// -------------------------------------------------------------
+// Callbacks from C-Glue Layer into Zig
+// -------------------------------------------------------------
 
-    const netif = esp.esp_netif_create_default_wifi_sta();
-    _ = netif;
-
-    var cfg = esp.wifi_init_config_t{}; // standard initialization
-    _ = esp.esp_wifi_init(&cfg);
-
-    var wifi_cfg = esp.wifi_config_t{
-        .sta = .{
-            .ssid = std.mem.zeroes([32]u8),
-            .password = std.mem.zeroes([64]u8),
-            .threshold = .{ .authmode = 3 }, // WPA2
-        },
-    };
-    @memcpy(wifi_cfg.sta.ssid[0..WIFI_SSID.len], WIFI_SSID);
-    @memcpy(wifi_cfg.sta.password[0..WIFI_PASS.len], WIFI_PASS);
-
-    _ = esp.esp_wifi_set_mode(1); // WIFI_MODE_STA
-    _ = esp.esp_wifi_set_config(0, &wifi_cfg); // ESP_IF_WIFI_STA
-    _ = esp.esp_wifi_start();
-
-    std.log.info("[Wi-Fi] Client station started. Connecting to SSID: {s}", .{WIFI_SSID});
+pub export fn tesla_zig_wifi_on_connected() callconv(.c) void {
+    std.log.info("[Wi-Fi callback] Wi-Fi connected!", .{});
 }
 
-// Initialize MQTT client.
-fn initMqtt() void {
-    if (builtin.os.tag != .freestanding) return;
-
-    var mqtt_cfg = esp.esp_mqtt_client_config_t{
-        .broker = .{
-            .address = .{
-                .uri = MQTT_BROKER_URL,
-            },
-        },
-    };
-
-    mqtt_client = esp.esp_mqtt_client_init(&mqtt_cfg);
-    _ = esp.esp_mqtt_register_events(mqtt_client, 0, mqttEventHandler, null); // ESP_EVENT_ANY_ID
-    _ = esp.esp_mqtt_client_start(mqtt_client);
-
-    std.log.info("[MQTT] Client initialized and started with broker: {s}", .{MQTT_BROKER_URL});
+pub export fn tesla_zig_mqtt_on_connected() callconv(.c) void {
+    std.log.info("[MQTT callback] Connected to broker. Subscribing to control topics and registering Auto-Discovery...", .{});
+    subscribeToControlTopics();
+    publishHomeAssistantDiscovery();
 }
 
-// MQTT Event Callback Handler.
-fn mqttEventHandler(handler_args: ?*anyopaque, base: esp.esp_event_base_t, event_id: i32, event_data: ?*anyopaque) callconv(.c) void {
-    _ = handler_args;
-    _ = base;
-    const event = @as(*esp.esp_mqtt_event_t, @ptrCast(@alignCast(event_data)));
-
-    switch (event_id) {
-        0 => { // MQTT_EVENT_CONNECTED
-            std.log.info("[MQTT] Connected to broker. Publishing Auto-Discovery entities...", .{});
-            publishHomeAssistantDiscovery();
-            subscribeToControlTopics();
-        },
-        1 => { // MQTT_EVENT_DISCONNECTED
-            std.log.warn("[MQTT] Disconnected from broker.", .{});
-        },
-        3 => { // MQTT_EVENT_SUBSCRIBED
-            std.log.info("[MQTT] Subscribed to command topic", .{});
-        },
-        5 => { // MQTT_EVENT_DATA
-            handleIncomingCommand(event.topic[0..@as(usize, @intCast(event.topic_len))], event.data[0..@as(usize, @intCast(event.data_len))]);
-        },
-        else => {},
-    }
+pub export fn tesla_zig_mqtt_on_message(
+    topic_ptr: [*]const u8,
+    topic_len: usize,
+    data_ptr: [*]const u8,
+    data_len: usize,
+) callconv(.c) void {
+    const topic = topic_ptr[0..topic_len];
+    const payload = data_ptr[0..data_len];
+    std.log.info("[MQTT callback] Received message on topic: {s} | payload: {s}", .{ topic, payload });
+    handleIncomingCommand(topic, payload);
 }
 
 // Subscribe to Home Assistant Command topics for control entities.
 fn subscribeToControlTopics() void {
-    if (mqtt_client == null) return;
-    const topic = "tesla_ble/" ++ VEHICLE_VIN ++ "/command/#";
-    _ = esp.esp_mqtt_client_subscribe(mqtt_client, topic, 1);
+    var buf: [256]u8 = undefined;
+    const topic = std.fmt.bufPrintZ(&buf, "tesla_ble/{s}/command/#", .{vehicle_vin}) catch return;
+    tesla_c_mqtt_subscribe(topic, 1);
 }
 
 // Publish Home Assistant MQTT Auto-Discovery Config payloads.
-// This utilizes completely stack-allocated static strings to avoid heap usage.
 fn publishHomeAssistantDiscovery() void {
-    if (mqtt_client == null) return;
+    var topic_buf: [256]u8 = undefined;
+    var payload_buf: [1024]u8 = undefined;
 
     // 1. Lock Switch entity discovery
-    const lock_discovery_topic = "homeassistant/switch/tesla_ble_" ++ VEHICLE_VIN ++ "_lock/config";
-    const lock_discovery_payload =
-        "{" ++
-        "\"name\":\"Tesla Lock\"," ++
-        "\"unique_id\":\"tesla_ble_" ++ VEHICLE_VIN ++ "_lock\"," ++
-        "\"state_topic\":\"tesla_ble/" ++ VEHICLE_VIN ++ "/state/lock\"," ++
-        "\"command_topic\":\"tesla_ble/" ++ VEHICLE_VIN ++ "/command/lock\"," ++
-        "\"payload_on\":\"LOCK\"," ++
-        "\"payload_off\":\"UNLOCK\"," ++
-        "\"state_on\":\"LOCKED\"," ++
-        "\"state_off\":\"UNLOCKED\"," ++
-        "\"device\":{" ++
-        "\"identifiers\":[\"tesla_ble_" ++ VEHICLE_VIN ++ "\"]," ++
-        "\"name\":\"Tesla Model C6\"," ++
-        "\"model\":\"Tesla BLE Zig Controller\"," ++
-        "\"manufacturer\":\"Antigravity\"" ++
-        "}" ++
-        "}";
+    const lock_discovery_topic = std.fmt.bufPrintZ(&topic_buf, "homeassistant/switch/tesla_ble_{s}_lock/config", .{vehicle_vin}) catch return;
+    const lock_discovery_payload = std.fmt.bufPrint(&payload_buf,
+        \\{{
+        \\"name":"Tesla Lock",
+        \\"unique_id":"tesla_ble_{s}_lock",
+        \\"state_topic":"tesla_ble/{s}/state/lock",
+        \\"command_topic":"tesla_ble/{s}/command/lock",
+        \\"payload_on":"LOCK",
+        \\"payload_off":"UNLOCK",
+        \\"state_on":"LOCKED",
+        \\"state_off":"UNLOCKED",
+        \\"device":{{
+        \\"identifiers":["tesla_ble_{s}"],
+        \\"name":"Tesla Model C6",
+        \\"model":"Tesla BLE Zig Controller",
+        \\"manufacturer":"Antigravity"
+        \\}}
+        \\}}
+    , .{ vehicle_vin, vehicle_vin, vehicle_vin, vehicle_vin }) catch return;
 
-    _ = esp.esp_mqtt_client_publish(mqtt_client, lock_discovery_topic, lock_discovery_payload, lock_discovery_payload.len, 1, 1);
+    tesla_c_mqtt_publish(lock_discovery_topic, lock_discovery_payload.ptr, lock_discovery_payload.len, 1, 1);
 
     // 2. Frunk binary control entity discovery
-    const frunk_discovery_topic = "homeassistant/button/tesla_ble_" ++ VEHICLE_VIN ++ "_frunk/config";
-    const frunk_discovery_payload =
-        "{" ++
-        "\"name\":\"Tesla Open Frunk\"," ++
-        "\"unique_id\":\"tesla_ble_" ++ VEHICLE_VIN ++ "_frunk\"," ++
-        "\"command_topic\":\"tesla_ble/" ++ VEHICLE_VIN ++ "/command/frunk\"," ++
-        "\"payload_press\":\"OPEN\"," ++
-        "\"device\":{" ++
-        "\"identifiers\":[\"tesla_ble_" ++ VEHICLE_VIN ++ "\"]," ++
-        "\"name\":\"Tesla Model C6\"" ++
-        "}" ++
-        "}";
+    const frunk_discovery_topic = std.fmt.bufPrintZ(&topic_buf, "homeassistant/button/tesla_ble_{s}_frunk/config", .{vehicle_vin}) catch return;
+    const frunk_discovery_payload = std.fmt.bufPrint(&payload_buf,
+        \\{{
+        \\"name":"Tesla Open Frunk",
+        \\"unique_id":"tesla_ble_{s}_frunk",
+        \\"command_topic":"tesla_ble/{s}/command/frunk",
+        \\"payload_press":"OPEN",
+        \\"device":{{
+        \\"identifiers":["tesla_ble_{s}"],
+        \\"name":"Tesla Model C6"
+        \\}}
+        \\}}
+    , .{ vehicle_vin, vehicle_vin, vehicle_vin }) catch return;
 
-    _ = esp.esp_mqtt_client_publish(mqtt_client, frunk_discovery_topic, frunk_discovery_payload, frunk_discovery_payload.len, 1, 1);
+    tesla_c_mqtt_publish(frunk_discovery_topic, frunk_discovery_payload.ptr, frunk_discovery_payload.len, 1, 1);
 
     // 3. Charger State binary sensor discovery
-    const charger_discovery_topic = "homeassistant/binary_sensor/tesla_ble_" ++ VEHICLE_VIN ++ "_charging/config";
-    const charger_discovery_payload =
-        "{" ++
-        "\"name\":\"Tesla Charging Status\"," ++
-        "\"unique_id\":\"tesla_ble_" ++ VEHICLE_VIN ++ "_charging\"," ++
-        "\"state_topic\":\"tesla_ble/" ++ VEHICLE_VIN ++ "/state/charging\"," ++
-        "\"payload_on\":\"CHARGING\"," ++
-        "\"payload_off\":\"NOT_CHARGING\"," ++
-        "\"device\":{" ++
-        "\"identifiers\":[\"tesla_ble_" ++ VEHICLE_VIN ++ "\"]," ++
-        "\"name\":\"Tesla Model C6\"" ++
-        "}" ++
-        "}";
+    const charger_discovery_topic = std.fmt.bufPrintZ(&topic_buf, "homeassistant/binary_sensor/tesla_ble_{s}_charging/config", .{vehicle_vin}) catch return;
+    const charger_discovery_payload = std.fmt.bufPrint(&payload_buf,
+        \\{{
+        \\"name":"Tesla Charging Status",
+        \\"unique_id":"tesla_ble_{s}_charging",
+        \\"state_topic":"tesla_ble/{s}/state/charging",
+        \\"payload_on":"CHARGING",
+        \\"payload_off":"NOT_CHARGING",
+        \\"device":{{
+        \\"identifiers":["tesla_ble_{s}"],
+        \\"name":"Tesla Model C6"
+        \\}}
+        \\}}
+    , .{ vehicle_vin, vehicle_vin, vehicle_vin }) catch return;
 
-    _ = esp.esp_mqtt_client_publish(mqtt_client, charger_discovery_topic, charger_discovery_payload, charger_discovery_payload.len, 1, 1);
+    tesla_c_mqtt_publish(charger_discovery_topic, charger_discovery_payload.ptr, charger_discovery_payload.len, 1, 1);
 
     std.log.info("[HA Discovery] Successfully registered switch.tesla_ble_lock, button.tesla_ble_frunk, and binary_sensor.tesla_ble_charging", .{});
 }
 
 // Handle inbound control messages from Home Assistant.
 fn handleIncomingCommand(topic: []const u8, payload: []const u8) void {
-    std.log.info("[MQTT RX] Incoming Command on Topic: {s} | Payload: {s}", .{topic, payload});
+    if (!is_initialized) return;
 
-    // Parse the command and add to the Zig command queue
     if (std.mem.endsWith(u8, topic, "command/lock")) {
         if (std.mem.eql(u8, payload, "LOCK")) {
             std.log.info("[Command] Enqueueing lock command", .{});
-            // Invoke the queue manager to enqueue a secure lock message
-            // queue_module.push_back_command(...)
+            _ = queue_inst.pushBack(2, 1, getMillis()) catch |err| {
+                std.log.err("Queue full: {any}", .{err});
+            };
         } else if (std.mem.eql(u8, payload, "UNLOCK")) {
             std.log.info("[Command] Enqueueing unlock command", .{});
+            _ = queue_inst.pushBack(2, 0, getMillis()) catch |err| {
+                std.log.err("Queue full: {any}", .{err});
+            };
         }
     } else if (std.mem.endsWith(u8, topic, "command/frunk")) {
         if (std.mem.eql(u8, payload, "OPEN")) {
             std.log.info("[Command] Enqueueing frunk release command", .{});
+            _ = queue_inst.pushBack(2, 31, getMillis()) catch |err| {
+                std.log.err("Queue full: {any}", .{err});
+            };
         }
     }
+
+    // Process the queue!
+    processQueue();
+}
+
+pub fn sendHandshakeRequest(domain: @import("protocol.zig").Domain) void {
+    if (!is_initialized) return;
+
+    var buffer: [256]u8 = undefined;
+    const r = @import("c_bindings.zig").TeslaRandom.random();
+
+    const len = client_inst.buildSessionInfoRequestMessage(r, domain, &buffer) catch |err| {
+        std.log.err("Failed to build SessionInfoRequest for domain {any}: {any}", .{domain, err});
+        return;
+    };
+
+    std.log.info("Sending SessionInfoRequest ({d} bytes) for domain {any}...", .{len, domain});
+    nimble_layer.writeTxCharacteristic(buffer[0..len]);
+}
+
+pub fn handleRxNotification(payload: []const u8) void {
+    if (!is_initialized) return;
+
+    std.log.info("[Firmware] Processing RX notification ({d} bytes)...", .{payload.len});
+
+    if (payload.len < 2) return;
+    const msg_len = (@as(usize, payload[0]) << 8) | payload[1];
+    if (payload.len < msg_len + 2) {
+        std.log.err("Incomplete BLE payload received. Expected {d} bytes, got {d} bytes.", .{msg_len + 2, payload.len});
+        return;
+    }
+
+    const msg_bytes = payload[2..msg_len + 2];
+
+    const decoded = @import("protobuf.zig").DecodedRoutableMessage.decode(msg_bytes) catch |err| {
+        std.log.err("Failed to decode RoutableMessage: {any}", .{err});
+        return;
+    };
+
+    if (decoded.session_info) |si_bytes| {
+        std.log.info("Received SessionInfo response!", .{});
+        const domain = decoded.to_destination_domain orelse .vehicle_security;
+        client_inst.handleSessionInfoResponse(domain, getMillis(), si_bytes) catch |err| {
+            std.log.err("Failed to handle SessionInfoResponse: {any}", .{err});
+            return;
+        };
+
+        std.log.info("Session for domain {any} initialized successfully! CSM State: {any}", .{domain, client_inst.csm.state});
+
+        // Publish lock state to Home Assistant on successful handshake (default to UNLOCKED)
+        publishStateUpdate("state/lock", "UNLOCKED");
+
+        processQueue();
+    } else {
+        var plaintext_buf: [512]u8 = undefined;
+        const decrypted_len = client_inst.decryptResponse(
+            .vehicle_security,
+            decoded,
+            &plaintext_buf,
+        ) catch |err| {
+            std.log.err("Failed to decrypt vehicle response: {any}", .{err});
+            return;
+        };
+
+        const plaintext = plaintext_buf[0..decrypted_len];
+        std.log.info("Successfully decrypted response ({d} bytes): {s}", .{decrypted_len, plaintext});
+    }
+}
+
+pub fn processQueue() void {
+    if (!is_initialized) return;
+
+    if (queue_inst.empty()) {
+        return;
+    }
+
+    // Check if we are connected and secure
+    if (client_inst.csm.state != .secure_vcsec and client_inst.csm.state != .fully_secure) {
+        std.log.warn("Cannot process queue: CSM state is not secure ({any})", .{client_inst.csm.state});
+        // Start scanning if we are disconnected!
+        if (client_inst.csm.state == .disconnected) {
+            std.log.info("CSM disconnected. Initiating BLE scanning...", .{});
+            nimble_layer.startScanning();
+        }
+        return;
+    }
+
+    const cmd = queue_inst.getFront().?;
+    std.log.info("Processing command ID {d}: domain={d}, action={d}", .{cmd.id, cmd.domain, cmd.action});
+
+    var buffer: [512]u8 = undefined;
+    const r = @import("c_bindings.zig").TeslaRandom.random();
+    var len: usize = 0;
+
+    if (cmd.action == 1) {
+        len = client_inst.buildRkeActionMessage(r, getMillis(), 1, &buffer) catch |err| {
+            std.log.err("Failed to build Lock message: {any}", .{err});
+            return;
+        };
+    } else if (cmd.action == 0) {
+        len = client_inst.buildRkeActionMessage(r, getMillis(), 0, &buffer) catch |err| {
+            std.log.err("Failed to build Unlock message: {any}", .{err});
+            return;
+        };
+    } else if (cmd.action == 30) {
+        len = client_inst.buildRkeActionMessage(r, getMillis(), 30, &buffer) catch |err| {
+            std.log.err("Failed to build Wake message: {any}", .{err});
+            return;
+        };
+    } else if (cmd.action == 31) {
+        len = client_inst.buildClosureMoveRequestMessage(r, getMillis(), 0, 1, &buffer) catch |err| {
+            std.log.err("Failed to build Frunk message: {any}", .{err});
+            return;
+        };
+    } else {
+        std.log.err("Unknown action {d}", .{cmd.action});
+        queue_inst.popFront();
+        return;
+    }
+
+    std.log.info("Sending secure command BLE packet ({d} bytes)...", .{len});
+    nimble_layer.writeTxCharacteristic(buffer[0..len]);
+
+    cmd.state = .waiting_for_response;
+    queue_inst.popFront();
+
+    if (cmd.action == 1) {
+        publishStateUpdate("state/lock", "LOCKED");
+    } else if (cmd.action == 0) {
+        publishStateUpdate("state/lock", "UNLOCKED");
+    }
+}
+
+fn publishStateUpdate(subtopic: []const u8, payload: []const u8) void {
+    var topic_buf: [256]u8 = undefined;
+    const topic = std.fmt.bufPrintZ(&topic_buf, "tesla_ble/{s}/{s}", .{vehicle_vin, subtopic}) catch return;
+    tesla_c_mqtt_publish(topic, payload.ptr, payload.len, 1, 1);
 }

@@ -14,12 +14,69 @@ const queue = @import("queue.zig");
 pub const firmware = @import("firmware.zig");
 pub const jni_bindings = @import("jni_bindings.zig");
 
+extern fn printf(format: [*:0]const u8, ...) callconv(.c) c_int;
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = logFn,
+};
+
+pub fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const level_str = switch (level) {
+        .err => "E",
+        .warn => "W",
+        .info => "I",
+        .debug => "D",
+    };
+    const scope_str = @tagName(scope);
+
+    var buf: [512]u8 = undefined;
+    
+    // Format the prefix
+    const prefix = std.fmt.bufPrint(&buf, "{s} ({s}): ", .{ level_str, scope_str }) catch return;
+    
+    // Format the message
+    const msg = std.fmt.bufPrint(buf[prefix.len..], format, args) catch return;
+    
+    const total_len = prefix.len + msg.len;
+    
+    // Append "\r\n" and null-terminator
+    if (total_len + 3 <= buf.len) {
+        buf[total_len] = '\r';
+        buf[total_len + 1] = '\n';
+        buf[total_len + 2] = 0;
+        _ = printf("%s", @as([*:0]const u8, @ptrCast(&buf[0])));
+    }
+}
+
+comptime {
+    _ = firmware.tesla_zig_app_main;
+    _ = firmware.tesla_zig_wifi_on_connected;
+    _ = firmware.tesla_zig_mqtt_on_connected;
+    _ = firmware.tesla_zig_mqtt_on_message;
+
+    const nimble_layer = @import("nimble.zig");
+    _ = nimble_layer.tesla_zig_ble_on_vehicle_discovered;
+    _ = nimble_layer.tesla_zig_ble_on_connected;
+    _ = nimble_layer.tesla_zig_ble_on_disconnected;
+    _ = nimble_layer.tesla_zig_ble_on_rx_notification;
+
+    _ = jni_bindings.Java_com_tesla_ble_TeslaClient_init;
+    _ = jni_bindings.Java_com_tesla_ble_TeslaClient_buildWakeCommand;
+    _ = jni_bindings.Java_com_tesla_ble_TeslaClient_decryptResponse;
+}
+
 // Linker hooks to resolve randomness in a target-agnostic manner.
 // The consumer C/C++ application must implement this (e.g. calling esp_fill_random on ESP32).
 extern fn tesla_random_bytes(buf: [*]u8, len: usize) void;
 
 // Simple custom std.Random implementation that delegates to our linker hook
-const TeslaRandom = struct {
+pub const TeslaRandom = struct {
     pub fn random() std.Random {
         return .{
             .ptr = undefined,
