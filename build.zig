@@ -252,5 +252,6 @@ pub fn build(b: *std.Build) void {
     flash_step.dependOn(&idf_flash.step);
 
     const idf_monitor = b.addSystemCommand(&.{ "idf.py", "-C", "standalone", "monitor" });
+    idf_monitor.stdio = .inherit;
     monitor_step.dependOn(&idf_monitor.step);
 }
