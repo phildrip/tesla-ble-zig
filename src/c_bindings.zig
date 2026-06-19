@@ -36,15 +36,15 @@ pub fn logFn(
     const scope_str = @tagName(scope);
 
     var buf: [512]u8 = undefined;
-    
+
     // Format the prefix
     const prefix = std.fmt.bufPrint(&buf, "{s} ({s}): ", .{ level_str, scope_str }) catch return;
-    
+
     // Format the message
     const msg = std.fmt.bufPrint(buf[prefix.len..], format, args) catch return;
-    
+
     const total_len = prefix.len + msg.len;
-    
+
     // Append "\r\n" and null-terminator
     if (total_len + 3 <= buf.len) {
         buf[total_len] = '\r';
@@ -332,6 +332,48 @@ export fn tesla_client_build_wake_command(
     return @intFromEnum(ErrorCode.OK);
 }
 
+/// Build a raw VCSEC present-key whitelist/pairing BLE packet.
+export fn tesla_client_build_whitelist_message(
+    client_ptr: ?*anyopaque,
+    role_val: u32,
+    form_factor_val: u32,
+    out_buffer: ?[*]u8,
+    out_buffer_len: usize,
+    out_written_len: ?*usize,
+) i32 {
+    const cp = client_ptr orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const out = out_buffer orelse return @intFromEnum(ErrorCode.InvalidArgs);
+    const wr = out_written_len orelse return @intFromEnum(ErrorCode.InvalidArgs);
+
+    const role: protocol.KeyRole = switch (role_val) {
+        0 => .none,
+        1 => .service,
+        2 => .owner,
+        3 => .driver,
+        4 => .fleet_manager,
+        5 => .vehicle_monitor,
+        6 => .charging_manager,
+        8 => .guest,
+        else => return @intFromEnum(ErrorCode.InvalidArgs),
+    };
+    const form_factor: protocol.KeyFormFactor = switch (form_factor_val) {
+        0 => .unknown,
+        1 => .nfc_card,
+        6 => .ios_device,
+        7 => .android_device,
+        9 => .cloud_key,
+        else => return @intFromEnum(ErrorCode.InvalidArgs),
+    };
+
+    const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
+    const len = c.buildWhiteListMessage(role, form_factor, out[0..out_buffer_len]) catch |err| {
+        return @intFromEnum(mapError(err));
+    };
+
+    wr.* = len;
+    return @intFromEnum(ErrorCode.OK);
+}
+
 /// Build a signed and encrypted Rear Trunk action command BLE packet.
 export fn tesla_client_build_trunk_command(
     client_ptr: ?*anyopaque,
@@ -424,14 +466,14 @@ export fn tesla_client_get_csm_state(client_ptr: ?*anyopaque) u8 {
 export fn tesla_client_handle_csm_event(client_ptr: ?*anyopaque, event_val: u8, current_timestamp: u32) void {
     const cp = client_ptr orelse return;
     const c = @as(*client.Client, @ptrCast(@alignCast(cp)));
-    
+
     const Event = @import("csm.zig").Event;
     var valid = false;
     inline for (std.meta.fields(Event)) |f| {
         if (event_val == f.value) valid = true;
     }
     if (!valid) return;
-    
+
     const event: Event = @enumFromInt(event_val);
     switch (event) {
         .ble_disconnected => c.handleBleDisconnected(current_timestamp),
@@ -529,7 +571,6 @@ export fn tesla_scheduler_update_config(
     s.config.poll_asleep_period_ms = poll_asleep_period_ms;
     s.config.poll_charging_period_ms = poll_charging_period_ms;
 }
-
 
 /// Perform a scheduler tick, returning decision outputs.
 export fn tesla_scheduler_tick(
@@ -815,6 +856,20 @@ test "C ABI Placement-Initialization and Communication Loop Verification" {
     tesla_client_get_key_id(client_buf.ptr, &key_id);
     try std.testing.expect(key_id[0] != 0);
 
+    var whitelist_buf: [256]u8 = undefined;
+    var whitelist_len: usize = 0;
+    const rc_whitelist = tesla_client_build_whitelist_message(
+        client_buf.ptr,
+        3, // ROLE_DRIVER
+        9, // KEY_FORM_FACTOR_CLOUD_KEY
+        &whitelist_buf,
+        whitelist_buf.len,
+        &whitelist_len,
+    );
+    try std.testing.expectEqual(@as(i32, 0), rc_whitelist);
+    try std.testing.expect(whitelist_len > 2);
+    try std.testing.expectEqual(@as(u8, 0x0a), whitelist_buf[2]);
+
     // Verify CSM bindings
     try std.testing.expectEqual(@as(u8, 0), tesla_client_get_csm_state(client_buf.ptr));
 
@@ -839,11 +894,11 @@ test "C ABI Scheduler Integration and State Updates" {
     tesla_scheduler_init(
         sched_buf.ptr,
         10000, // post_wake_poll_time_ms
-        5000,  // poll_data_period_ms
+        5000, // poll_data_period_ms
         30000, // poll_asleep_period_ms
         15000, // poll_charging_period_ms
-        true,  // fast_poll_if_unlocked
-        true,  // wake_on_boot
+        true, // fast_poll_if_unlocked
+        true, // wake_on_boot
     );
 
     // Initial state check

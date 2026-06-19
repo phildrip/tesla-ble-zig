@@ -12,10 +12,11 @@ extern fn tesla_c_ble_write_tx(conn_handle: u16, data: [*]const u8, len: usize) 
 
 // Tesla Service UUID definitions
 pub const TESLA_SERVICE_UUID128 = "00000211-b2d1-43f0-9b88-960cebf8b91e";
-pub const TESLA_CHAR_TX_UUID128  = "00000212-b2d1-43f0-9b88-960cebf8b91e";
-pub const TESLA_CHAR_RX_UUID128  = "00000213-b2d1-43f0-9b88-960cebf8b91e";
+pub const TESLA_CHAR_TX_UUID128 = "00000212-b2d1-43f0-9b88-960cebf8b91e";
+pub const TESLA_CHAR_RX_UUID128 = "00000213-b2d1-43f0-9b88-960cebf8b91e";
 
 var target_conn_handle: u16 = 0;
+var has_target_conn_handle: bool = false;
 
 // Initialize the NimBLE Bluetooth host stack.
 pub fn initNimble() void {
@@ -43,8 +44,9 @@ pub export fn tesla_zig_ble_on_vehicle_discovered(ble_addr: *const anyopaque) ca
 
 pub export fn tesla_zig_ble_on_connected(conn_handle: u16) callconv(.c) void {
     target_conn_handle = conn_handle;
+    has_target_conn_handle = true;
     std.log.info("[BLE callback] Connected successfully! Conn Handle: {d}", .{conn_handle});
-    
+
     const firmware = @import("firmware.zig");
     if (firmware.is_initialized) {
         firmware.client_inst.handleBleConnected(firmware.getMillis());
@@ -52,22 +54,23 @@ pub export fn tesla_zig_ble_on_connected(conn_handle: u16) callconv(.c) void {
 }
 
 pub export fn tesla_zig_ble_on_channel_ready() callconv(.c) void {
-    std.log.info("[BLE callback] GATT channel ready! Initiating handshake...", .{});
+    std.log.info("[BLE callback] GATT channel ready!", .{});
     const firmware = @import("firmware.zig");
     if (firmware.is_initialized) {
-        firmware.sendHandshakeRequest(.vehicle_security);
+        firmware.handleBleChannelReady();
     }
 }
 
 pub export fn tesla_zig_ble_on_disconnected() callconv(.c) void {
     std.log.warn("[BLE callback] Disconnected from vehicle. Restarting scan...", .{});
     target_conn_handle = 0;
-    
+    has_target_conn_handle = false;
+
     const firmware = @import("firmware.zig");
     if (firmware.is_initialized) {
         firmware.client_inst.handleBleDisconnected(firmware.getMillis());
     }
-    
+
     startScanning();
 }
 
@@ -80,10 +83,10 @@ pub export fn tesla_zig_ble_on_rx_notification(data_ptr: [*]const u8, len: usize
 // Write bytes to the Tesla VCSEC Tx Characteristic.
 pub fn writeTxCharacteristic(payload: []const u8) void {
     if (builtin.os.tag != .freestanding) {
-        std.log.info("[Mock BLE TX] Writing {d} bytes to vehicle: {x}", .{payload.len, payload});
+        std.log.info("[Mock BLE TX] Writing {d} bytes to vehicle: {x}", .{ payload.len, payload });
         return;
     }
-    if (target_conn_handle == 0) return;
+    if (!has_target_conn_handle) return;
     tesla_c_ble_write_tx(target_conn_handle, payload.ptr, payload.len);
     std.log.info("[BLE TX] Transmitted {d} bytes to vehicle characteristic", .{payload.len});
 }

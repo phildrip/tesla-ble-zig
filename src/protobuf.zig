@@ -328,6 +328,9 @@ pub const AesGcmResponseSignatureData = struct {
 
 pub const DecodedRoutableMessage = struct {
     to_destination_domain: ?protocol.Domain = null,
+    from_destination_domain: ?protocol.Domain = null,
+    to_destination_routing_address: [16]u8 = [_]u8{0} ** 16,
+    to_destination_routing_address_len: usize = 0,
     from_destination_routing_address: [16]u8 = [_]u8{0} ** 16,
     from_destination_routing_address_len: usize = 0,
     protobuf_message_as_bytes: ?[]const u8 = null,
@@ -353,6 +356,14 @@ pub const DecodedRoutableMessage = struct {
                         const inner_tag = try inner.readTag();
                         if (inner_tag.field_number == 1) { // domain enum
                             self.to_destination_domain = @enumFromInt(try inner.readVarint());
+                        } else if (inner_tag.field_number == 2) { // routing_address bytes
+                            const addr_len = try inner.readVarint();
+                            const addr_bytes = try inner.readBytes(addr_len);
+                            if (addr_bytes.len > 16) return error.RoutingAddressTooLong;
+                            @memcpy(self.to_destination_routing_address[0..addr_bytes.len], addr_bytes);
+                            self.to_destination_routing_address_len = addr_bytes.len;
+                        } else {
+                            try inner.skipValue(inner_tag.wire_type);
                         }
                     }
                 },
@@ -362,12 +373,16 @@ pub const DecodedRoutableMessage = struct {
                     var inner = Reader.init(bytes);
                     if (inner.hasMore()) {
                         const inner_tag = try inner.readTag();
-                        if (inner_tag.field_number == 2) { // routing_address bytes
+                        if (inner_tag.field_number == 1) { // domain enum
+                            self.from_destination_domain = @enumFromInt(try inner.readVarint());
+                        } else if (inner_tag.field_number == 2) { // routing_address bytes
                             const addr_len = try inner.readVarint();
                             const addr_bytes = try inner.readBytes(addr_len);
                             if (addr_bytes.len > 16) return error.RoutingAddressTooLong;
                             @memcpy(self.from_destination_routing_address[0..addr_bytes.len], addr_bytes);
                             self.from_destination_routing_address_len = addr_bytes.len;
+                        } else {
+                            try inner.skipValue(inner_tag.wire_type);
                         }
                     }
                 },
@@ -426,6 +441,113 @@ pub const DecodedRoutableMessage = struct {
     }
 };
 
+pub const VcsecWhitelistOperationStatus = struct {
+    information: u32 = 0,
+    operation_status: u32 = 0,
+
+    pub fn decode(buffer: []const u8) !VcsecWhitelistOperationStatus {
+        var reader = Reader.init(buffer);
+        var self = VcsecWhitelistOperationStatus{};
+
+        while (reader.hasMore()) {
+            const tag = try reader.readTag();
+            switch (tag.field_number) {
+                1 => {
+                    self.information = @intCast(try reader.readVarint());
+                },
+                2 => {
+                    try reader.skipValue(tag.wire_type);
+                },
+                3 => {
+                    self.operation_status = @intCast(try reader.readVarint());
+                },
+                else => {
+                    try reader.skipValue(tag.wire_type);
+                },
+            }
+        }
+
+        return self;
+    }
+};
+
+pub const VcsecCommandStatus = struct {
+    operation_status: u32 = 0,
+    signed_message_information: u32 = 0,
+    whitelist_operation_status: ?VcsecWhitelistOperationStatus = null,
+
+    pub fn decode(buffer: []const u8) !VcsecCommandStatus {
+        var reader = Reader.init(buffer);
+        var self = VcsecCommandStatus{};
+
+        while (reader.hasMore()) {
+            const tag = try reader.readTag();
+            switch (tag.field_number) {
+                1 => {
+                    self.operation_status = @intCast(try reader.readVarint());
+                },
+                2 => {
+                    const len = try reader.readVarint();
+                    const bytes = try reader.readBytes(len);
+                    var inner = Reader.init(bytes);
+                    while (inner.hasMore()) {
+                        const inner_tag = try inner.readTag();
+                        switch (inner_tag.field_number) {
+                            2 => self.signed_message_information = @intCast(try inner.readVarint()),
+                            else => try inner.skipValue(inner_tag.wire_type),
+                        }
+                    }
+                },
+                3 => {
+                    const len = try reader.readVarint();
+                    const bytes = try reader.readBytes(len);
+                    self.whitelist_operation_status = try VcsecWhitelistOperationStatus.decode(bytes);
+                },
+                else => {
+                    try reader.skipValue(tag.wire_type);
+                },
+            }
+        }
+
+        return self;
+    }
+};
+
+pub const DecodedVcsecMessage = struct {
+    command_status: ?VcsecCommandStatus = null,
+    has_whitelist_info: bool = false,
+    has_whitelist_entry_info: bool = false,
+
+    pub fn decode(buffer: []const u8) !DecodedVcsecMessage {
+        var reader = Reader.init(buffer);
+        var self = DecodedVcsecMessage{};
+
+        while (reader.hasMore()) {
+            const tag = try reader.readTag();
+            switch (tag.field_number) {
+                4 => {
+                    const len = try reader.readVarint();
+                    const bytes = try reader.readBytes(len);
+                    self.command_status = try VcsecCommandStatus.decode(bytes);
+                },
+                16 => {
+                    self.has_whitelist_info = true;
+                    try reader.skipValue(tag.wire_type);
+                },
+                17 => {
+                    self.has_whitelist_entry_info = true;
+                    try reader.skipValue(tag.wire_type);
+                },
+                else => {
+                    try reader.skipValue(tag.wire_type);
+                },
+            }
+        }
+
+        return self;
+    }
+};
+
 pub const UnsignedMessage = struct {
     pub fn encodeRkeAction(action: u32, outer: *Writer) !void {
         // Message is UnsignedMessage, field 2 is RKEAction (enum)
@@ -443,6 +565,117 @@ pub const UnsignedMessage = struct {
         }
         // UnsignedMessage field 4 is closureMoveRequest
         try outer.writeLengthDelimited(4, inner.buffer[0..inner.pos]);
+    }
+
+    pub fn encodeWhitelistOperation(
+        public_key: []const u8,
+        role: protocol.KeyRole,
+        form_factor: protocol.KeyFormFactor,
+        outer: *Writer,
+    ) !void {
+        var whitelist_buf: [128]u8 = undefined;
+        var whitelist = Writer.init(&whitelist_buf);
+
+        try VcsecWhitelistOperation.encodeAddKeyAndPermissions(
+            public_key,
+            role,
+            form_factor,
+            &whitelist,
+        );
+
+        // UnsignedMessage field 16 is WhitelistOperation.
+        try outer.writeLengthDelimited(16, whitelist.buffer[0..whitelist.pos]);
+    }
+};
+
+pub const CarServerAction = struct {
+    pub fn encodeVehicleAction(action_tag: u32, outer: *Writer) !void {
+        var action_payload_buf: [8]u8 = undefined;
+        var action_payload = Writer.init(&action_payload_buf);
+        // Nanopb encodes otherwise-empty CarServer action messages with dummy_field = 1.
+        try action_payload.writeUint32(1, 1);
+
+        var vehicle_action_buf: [16]u8 = undefined;
+        var vehicle_action = Writer.init(&vehicle_action_buf);
+        // CarServer.VehicleAction oneof field; flash lights is field 26.
+        try vehicle_action.writeLengthDelimited(action_tag, action_payload_buf[0..action_payload.pos]);
+
+        var action_buf: [24]u8 = undefined;
+        var action = Writer.init(&action_buf);
+        // CarServer.Action.vehicleAction = 2
+        try action.writeLengthDelimited(2, vehicle_action.buffer[0..vehicle_action.pos]);
+
+        try outer.writeBytes(action.buffer[0..action.pos]);
+    }
+};
+
+pub const VcsecPublicKey = struct {
+    pub fn encode(public_key: []const u8, field_number: u32, outer: *Writer) !void {
+        var temp_buf: [72]u8 = undefined;
+        var inner = Writer.init(&temp_buf);
+        // bytes PublicKeyRaw = 1;
+        try inner.writeLengthDelimited(1, public_key);
+        try outer.writeLengthDelimited(field_number, inner.buffer[0..inner.pos]);
+    }
+};
+
+pub const VcsecKeyMetadata = struct {
+    pub fn encode(form_factor: protocol.KeyFormFactor, field_number: u32, outer: *Writer) !void {
+        var temp_buf: [8]u8 = undefined;
+        var inner = Writer.init(&temp_buf);
+        // KeyFormFactor keyFormFactor = 1;
+        try inner.writeUint32(1, @intFromEnum(form_factor));
+        try outer.writeLengthDelimited(field_number, inner.buffer[0..inner.pos]);
+    }
+};
+
+pub const VcsecPermissionChange = struct {
+    pub fn encodeAddKey(public_key: []const u8, role: protocol.KeyRole, field_number: u32, outer: *Writer) !void {
+        var temp_buf: [96]u8 = undefined;
+        var inner = Writer.init(&temp_buf);
+        // PublicKey key = 1;
+        try VcsecPublicKey.encode(public_key, 1, &inner);
+        // Keys.Role keyRole = 4;
+        try inner.writeUint32(4, @intFromEnum(role));
+        try outer.writeLengthDelimited(field_number, inner.buffer[0..inner.pos]);
+    }
+};
+
+pub const VcsecWhitelistOperation = struct {
+    pub fn encodeAddKeyAndPermissions(
+        public_key: []const u8,
+        role: protocol.KeyRole,
+        form_factor: protocol.KeyFormFactor,
+        outer: *Writer,
+    ) !void {
+        // PermissionChange addKeyToWhitelistAndAddPermissions = 5;
+        try VcsecPermissionChange.encodeAddKey(public_key, role, 5, outer);
+        // KeyMetadata metadataForKey = 6;
+        try VcsecKeyMetadata.encode(form_factor, 6, outer);
+    }
+};
+
+pub const VcsecSignedMessage = struct {
+    pub fn encode(
+        protobuf_message: []const u8,
+        signature_type: protocol.VcsecSignatureType,
+        field_number: u32,
+        outer: *Writer,
+    ) !void {
+        var temp_buf: [384]u8 = undefined;
+        var inner = Writer.init(&temp_buf);
+        // bytes protobufMessageAsBytes = 2;
+        try inner.writeLengthDelimited(2, protobuf_message);
+        // SignatureType signatureType = 3;
+        try inner.writeUint32(3, @intFromEnum(signature_type));
+        try outer.writeLengthDelimited(field_number, inner.buffer[0..inner.pos]);
+    }
+};
+
+pub const VcsecToVcsecMessage = struct {
+    pub fn encodePresentKey(protobuf_message: []const u8, outer: *Writer) !void {
+        // SignedMessage signedMessage = 1;
+        try VcsecSignedMessage.encode(protobuf_message, .present_key, 1, outer);
     }
 };
 
@@ -508,6 +741,70 @@ test "UnsignedMessage Serialization" {
     }
 }
 
+test "VCSEC WhitelistOperation serialization" {
+    var buffer: [256]u8 = undefined;
+    var writer = Writer.init(&buffer);
+    const mock_pub_key = [_]u8{0x04} ++ ([_]u8{0xee} ** 64);
+
+    try UnsignedMessage.encodeWhitelistOperation(&mock_pub_key, .driver, .cloud_key, &writer);
+    const written = buffer[0..writer.pos];
+
+    try std.testing.expectEqual(@as(u8, 0x82), written[0]); // UnsignedMessage field 16, wire type 2.
+    try std.testing.expectEqual(@as(u8, 0x01), written[1]);
+    try std.testing.expectEqual(@as(u8, 0x4d), written[2]); // WhitelistOperation payload length.
+
+    const whitelist_payload = written[3..];
+    try std.testing.expectEqual(@as(u8, 0x2a), whitelist_payload[0]); // field 5 PermissionChange.
+    try std.testing.expectEqual(@as(u8, 0x47), whitelist_payload[1]);
+    try std.testing.expectEqual(@as(u8, 0x32), whitelist_payload[73]); // field 6 KeyMetadata.
+    try std.testing.expectEqual(@as(u8, 0x02), whitelist_payload[74]);
+    try std.testing.expectEqual(@as(u8, 0x08), whitelist_payload[75]); // keyFormFactor field 1.
+    try std.testing.expectEqual(@as(u8, 0x09), whitelist_payload[76]); // CLOUD_KEY.
+}
+
+test "VCSEC ToVCSECMessage present-key wrapper serialization" {
+    var buffer: [256]u8 = undefined;
+    var payload_buf: [128]u8 = undefined;
+    var payload_writer = Writer.init(&payload_buf);
+    const mock_pub_key = [_]u8{0x04} ++ ([_]u8{0xee} ** 64);
+
+    try UnsignedMessage.encodeWhitelistOperation(&mock_pub_key, .driver, .cloud_key, &payload_writer);
+
+    var writer = Writer.init(&buffer);
+    try VcsecToVcsecMessage.encodePresentKey(payload_buf[0..payload_writer.pos], &writer);
+    const written = buffer[0..writer.pos];
+
+    try std.testing.expectEqual(@as(u8, 0x0a), written[0]); // ToVCSECMessage field 1.
+    try std.testing.expectEqual(@as(u8, 0x54), written[1]); // SignedMessage length.
+    try std.testing.expectEqual(@as(u8, 0x12), written[2]); // SignedMessage field 2.
+    try std.testing.expectEqual(@as(u8, 0x50), written[3]); // UnsignedMessage payload length.
+    try std.testing.expectEqual(@as(u8, 0x18), written[84]); // SignedMessage field 3.
+    try std.testing.expectEqual(@as(u8, 0x02), written[85]); // PRESENT_KEY.
+}
+
+test "VCSEC FromVCSEC command status decoding" {
+    var whitelist_status_buf: [16]u8 = undefined;
+    var whitelist_status = Writer.init(&whitelist_status_buf);
+    try whitelist_status.writeUint32(1, 25); // timed out waiting for tap
+    try whitelist_status.writeUint32(3, 2); // OPERATIONSTATUS_ERROR
+
+    var command_status_buf: [32]u8 = undefined;
+    var command_status = Writer.init(&command_status_buf);
+    try command_status.writeUint32(1, 2);
+    try command_status.writeLengthDelimited(3, whitelist_status_buf[0..whitelist_status.pos]);
+
+    var from_vcsec_buf: [64]u8 = undefined;
+    var from_vcsec = Writer.init(&from_vcsec_buf);
+    try from_vcsec.writeLengthDelimited(4, command_status_buf[0..command_status.pos]);
+
+    const decoded = try DecodedVcsecMessage.decode(from_vcsec_buf[0..from_vcsec.pos]);
+    try std.testing.expect(decoded.command_status != null);
+    try std.testing.expectEqual(@as(u32, 2), decoded.command_status.?.operation_status);
+    try std.testing.expect(decoded.command_status.?.whitelist_operation_status != null);
+    try std.testing.expectEqual(@as(u32, 25), decoded.command_status.?.whitelist_operation_status.?.information);
+    try std.testing.expectEqual(@as(u32, 2), decoded.command_status.?.whitelist_operation_status.?.operation_status);
+}
+
 test "Vehicle SessionInfo Response decoding" {
     // 31-byte payload: 1a 1d 12 16 0a 14 d6 4c a5 77 03 55 b2 a2 34 8c 58 8f 19 69 d3 62 38 bc 02 5f 18 02 22 01 01
     const raw_payload = [_]u8{
@@ -527,10 +824,9 @@ test "Vehicle SessionInfo Response decoding" {
 
     // Let's decode the inner SessionInfo
     const info = try SessionInfo.decode(si_bytes);
-    
+
     // Let's print the decoded fields for debugging
     std.debug.print("Decoded SessionInfo status: {d}\n", .{info.status});
     std.debug.print("Decoded SessionInfo public_key_len: {d}\n", .{info.public_key_len});
     std.debug.print("Decoded SessionInfo counter: {d}\n", .{info.counter});
 }
-

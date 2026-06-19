@@ -32,10 +32,38 @@ pub const SignatureType = enum(u8) {
     aes_gcm_response = 9,
 };
 
+pub const KeyRole = enum(u32) {
+    none = 0,
+    service = 1,
+    owner = 2,
+    driver = 3,
+    fleet_manager = 4,
+    vehicle_monitor = 5,
+    charging_manager = 6,
+    guest = 8,
+};
+
+pub const KeyFormFactor = enum(u32) {
+    unknown = 0,
+    nfc_card = 1,
+    ios_device = 6,
+    android_device = 7,
+    cloud_key = 9,
+};
+
+pub const VcsecSignatureType = enum(u32) {
+    none = 0,
+    present_key = 2,
+};
+
 test "protocol type alignments" {
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Domain.vehicle_security));
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(Domain.infotainment));
     try std.testing.expectEqual(@as(u8, 5), @intFromEnum(Tag.counter));
     try std.testing.expectEqual(@as(u8, 255), @intFromEnum(Tag.end));
     try std.testing.expectEqual(@as(u8, 9), @intFromEnum(SignatureType.aes_gcm_response));
+    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(KeyRole.driver));
+    try std.testing.expectEqual(@as(u32, 6), @intFromEnum(KeyRole.charging_manager));
+    try std.testing.expectEqual(@as(u32, 9), @intFromEnum(KeyFormFactor.cloud_key));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(VcsecSignatureType.present_key));
 }

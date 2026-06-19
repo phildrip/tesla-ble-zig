@@ -3,9 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/bignum.h>
+#include <mbedtls/base64.h>
 #include <mbedtls/private/bignum.h>
 #include <mbedtls/private/pk_private.h>
 #include "nvs_flash.h"
@@ -16,6 +18,8 @@
 #include "mqtt_client.h"
 #include "sdkconfig.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // Simple Base64 encoder for exactly 32 bytes to Base64
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -34,6 +38,48 @@ static void base64_encode_32(const uint8_t *src, char *dst) {
     dst[j++] = base64_chars[(src[31] & 0x0F) << 2];
     dst[j++] = '=';
     dst[j] = '\0';
+}
+
+static bool extract_sec1_private_key_from_pem(const unsigned char *pem, size_t pem_len, uint8_t raw_key[32]) {
+    const char *pem_str = (const char *)pem;
+    const char *begin = strstr(pem_str, "-----BEGIN EC PRIVATE KEY-----");
+    const char *end = strstr(pem_str, "-----END EC PRIVATE KEY-----");
+    if (begin == NULL || end == NULL || end <= begin || (size_t)(end - pem_str) > pem_len) {
+        return false;
+    }
+
+    begin = strchr(begin, '\n');
+    if (begin == NULL || begin >= end) {
+        return false;
+    }
+    begin++;
+
+    unsigned char b64[256];
+    size_t b64_len = 0;
+    for (const char *p = begin; p < end && b64_len < sizeof(b64); p++) {
+        if (*p != '\r' && *p != '\n' && *p != ' ' && *p != '\t') {
+            b64[b64_len++] = (unsigned char)*p;
+        }
+    }
+
+    unsigned char der[160];
+    size_t der_len = 0;
+    int rc = mbedtls_base64_decode(der, sizeof(der), &der_len, b64, b64_len);
+    if (rc != 0) {
+        printf("[C System] Failed to base64-decode EC private key PEM (rc=%d).\n", rc);
+        return false;
+    }
+
+    // RFC 5915 ECPrivateKey: SEQUENCE { version, privateKey OCTET STRING, ... }.
+    // The Tesla ESPHome key stores a 32-byte P-256 scalar as the first OCTET STRING.
+    for (size_t i = 0; i + 34 <= der_len; i++) {
+        if (der[i] == 0x04 && der[i + 1] == 0x20) {
+            memcpy(raw_key, der + i + 2, 32);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // NimBLE BLE Headers
@@ -64,7 +110,11 @@ extern void tesla_zig_app_main(
     const char* vin,
     const char* ble_mac,
     const char* api_key,
-    const char* vehicle_pub_key
+    const char* vehicle_pub_key,
+    const uint8_t* saved_vcsec_session,
+    size_t saved_vcsec_session_len,
+    const uint8_t* saved_infotainment_session,
+    size_t saved_infotainment_session_len
 );
 extern void tesla_zig_wifi_on_connected(void);
 extern void tesla_zig_mqtt_on_connected(void);
@@ -168,6 +218,7 @@ void tesla_c_mqtt_init(const char* broker_url) {
     printf("[C MQTT] Initializing MQTT client for URL: %s...\n", broker_url);
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = broker_url,
+        .task.stack_size = 49152,
     };
 #if defined(CONFIG_MQTT_USERNAME)
     if (strlen(CONFIG_MQTT_USERNAME) > 0) {
@@ -420,9 +471,21 @@ void tesla_c_ble_write_tx(uint16_t conn_handle, const uint8_t* data, int len) {
         printf("[C BLE] Cannot write: TX character handle not discovered yet.\n");
         return;
     }
-    int rc = ble_gattc_write_flat(conn_handle, gatt_tx_char_val_handle, data, len, NULL, NULL);
-    if (rc != 0) {
-        printf("[C BLE] Error writing to TX characteristic: %d\n", rc);
+
+    const int block_len = 20;
+    printf("[C BLE] Writing TX message in %d-byte chunks (total=%d).\n", block_len, len);
+    for (int offset = 0; offset < len; offset += block_len) {
+        int chunk_len = len - offset;
+        if (chunk_len > block_len) {
+            chunk_len = block_len;
+        }
+
+        int rc = ble_gattc_write_no_rsp_flat(conn_handle, gatt_tx_char_val_handle, data + offset, chunk_len);
+        if (rc != 0) {
+            printf("[C BLE] Error writing TX chunk offset=%d len=%d: %d\n", offset, chunk_len, rc);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -472,8 +535,7 @@ void app_main(void) {
     printf("[C System] Initializing system and flash memory...\n");
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        err = nvs_flash_init();
+        printf("[C System] NVS init returned %d; refusing to erase paired storage keys.\n", err);
     }
     printf("[C System] NVS partition initialized: %d\n", err);
 
@@ -483,60 +545,82 @@ void app_main(void) {
     // Check for registered/whitelisted private key in NVS "storage" namespace
     char nvs_b64_key[45] = {0};
     const char *api_key_to_use = CONFIG_API_ENCRYPTION_KEY;
-    
-    nvs_handle_t my_handle;
-    esp_err_t nvs_err = nvs_open("storage", NVS_READONLY, &my_handle);
-    if (nvs_err == ESP_OK) {
-        size_t required_private_key_size = 0;
-        nvs_err = nvs_get_blob(my_handle, "private_key", NULL, &required_private_key_size);
-        if (nvs_err == ESP_OK && required_private_key_size > 0) {
-            printf("[C System] Found real whitelisted private key blob in NVS 'storage' (size=%d bytes).\n", (int)required_private_key_size);
-            unsigned char *private_key_buffer = malloc(required_private_key_size + 1);
-            if (private_key_buffer != NULL) {
-                nvs_err = nvs_get_blob(my_handle, "private_key", private_key_buffer, &required_private_key_size);
-                if (nvs_err == ESP_OK) {
-                    private_key_buffer[required_private_key_size] = '\0'; // Null-terminate for PEM format
-                    
-                    mbedtls_pk_context pk_ctx;
-                    mbedtls_pk_init(&pk_ctx);
-                    int parse_rc = mbedtls_pk_parse_key(&pk_ctx, private_key_buffer, required_private_key_size + 1, NULL, 0);
-                    if (parse_rc == 0) {
-                        mbedtls_ecp_keypair *ecp = mbedtls_pk_ec(pk_ctx);
-                        if (ecp != NULL) {
-                            uint8_t raw_key[32];
-                            int mpi_rc = mbedtls_mpi_write_binary(&ecp->d, raw_key, 32);
-                            if (mpi_rc == 0) {
-                                printf("[C System] Successfully extracted raw 32-byte SEC1 private key from mbedtls ECP keypair!\n");
-                                base64_encode_32(raw_key, nvs_b64_key);
-                                printf("[C System] NVS Base64 Key: %s\n", nvs_b64_key);
-                                api_key_to_use = nvs_b64_key;
-                            } else {
-                                printf("[C System] Failed to write binary from mbedtls MPI (rc=%d)\n", mpi_rc);
-                            }
+    unsigned char *saved_vcsec_session = NULL;
+    size_t saved_vcsec_session_len = 0;
+    unsigned char *saved_infotainment_session = NULL;
+    size_t saved_infotainment_session_len = 0;
+    if (err == ESP_OK) {
+        nvs_handle_t my_handle;
+        esp_err_t nvs_err = nvs_open("storage", NVS_READONLY, &my_handle);
+        if (nvs_err == ESP_OK) {
+            // Restore previously paired session blobs from ESPHome-compatible NVS.
+            size_t sec_size = 0;
+            if (nvs_get_blob(my_handle, "tk_vcsec", NULL, &sec_size) == ESP_OK && sec_size > 0) {
+                unsigned char *sec_buf = malloc(sec_size);
+                if (sec_buf && nvs_get_blob(my_handle, "tk_vcsec", sec_buf, &sec_size) == ESP_OK) {
+                    saved_vcsec_session = malloc(sec_size);
+                    if (saved_vcsec_session) {
+                        memcpy(saved_vcsec_session, sec_buf, sec_size);
+                        saved_vcsec_session_len = sec_size;
+                    }
+                    printf("[C System] Found tk_vcsec SessionInfo blob in NVS (size=%d bytes).\n", (int)sec_size);
+                }
+                free(sec_buf);
+            } else {
+                printf("[C System] No tk_vcsec blob found in NVS.\n");
+            }
+            size_t info_size = 0;
+            if (nvs_get_blob(my_handle, "tk_infotainment", NULL, &info_size) == ESP_OK && info_size > 0) {
+                unsigned char *info_buf = malloc(info_size);
+                if (info_buf && nvs_get_blob(my_handle, "tk_infotainment", info_buf, &info_size) == ESP_OK) {
+                    saved_infotainment_session = malloc(info_size);
+                    if (saved_infotainment_session) {
+                        memcpy(saved_infotainment_session, info_buf, info_size);
+                        saved_infotainment_session_len = info_size;
+                    }
+                    printf("[C System] Found tk_infotainment SessionInfo blob in NVS (size=%d bytes).\n", (int)info_size);
+                }
+                free(info_buf);
+            } else {
+                printf("[C System] No tk_infotainment blob found in NVS.\n");
+            }
+
+            size_t required_private_key_size = 0;
+            nvs_err = nvs_get_blob(my_handle, "private_key", NULL, &required_private_key_size);
+            if (nvs_err == ESP_OK && required_private_key_size > 0) {
+                printf("[C System] Found real whitelisted private key blob in NVS 'storage' (size=%d bytes).\n", (int)required_private_key_size);
+                unsigned char *private_key_buffer = malloc(required_private_key_size + 1);
+                if (private_key_buffer != NULL) {
+                    nvs_err = nvs_get_blob(my_handle, "private_key", private_key_buffer, &required_private_key_size);
+                    if (nvs_err == ESP_OK) {
+                        private_key_buffer[required_private_key_size] = '\0'; // Null-terminate for PEM format
+
+                        uint8_t raw_key[32];
+                        if (extract_sec1_private_key_from_pem(private_key_buffer, required_private_key_size, raw_key)) {
+                            printf("[C System] Successfully extracted raw 32-byte SEC1 private key from NVS PEM.\n");
+                            base64_encode_32(raw_key, nvs_b64_key);
+                            api_key_to_use = nvs_b64_key;
+                        } else if (required_private_key_size == 32) {
+                            printf("[C System] Fallback: parsed private_key blob directly as raw 32-byte key.\n");
+                            base64_encode_32(private_key_buffer, nvs_b64_key);
+                            api_key_to_use = nvs_b64_key;
                         } else {
-                            printf("[C System] Failed to get ECP keypair context from parsed PK context.\n");
+                            printf("[C System] Failed to parse private_key blob as SEC1 PEM or raw scalar.\n");
                         }
                     } else {
-                        printf("[C System] mbedtls_pk_parse_key failed with error -0x%04x. Trying raw 32-byte parse...\n", -parse_rc);
-                        if (required_private_key_size == 32) {
-                            printf("[C System] Fallback: parsed directly as raw 32-byte key.\n");
-                            base64_encode_32(private_key_buffer, nvs_b64_key);
-                            printf("[C System] NVS Base64 Key: %s\n", nvs_b64_key);
-                            api_key_to_use = nvs_b64_key;
-                        }
+                        printf("[C System] Failed to read private key blob bytes from NVS storage.\n");
                     }
-                    mbedtls_pk_free(&pk_ctx);
-                } else {
-                    printf("[C System] Failed to read private key blob bytes from NVS storage.\n");
+                    free(private_key_buffer);
                 }
-                free(private_key_buffer);
+            } else {
+                printf("[C System] No private_key blob found in NVS 'storage' (err=%d, len=%d). Using default config key.\n", nvs_err, (int)required_private_key_size);
             }
+            nvs_close(my_handle);
         } else {
-            printf("[C System] No private_key blob found in NVS 'storage' (err=%d, len=%d). Using default config key.\n", nvs_err, (int)required_private_key_size);
+            printf("[C System] Failed to open NVS namespace 'storage' (err=%d). Using default config key.\n", nvs_err);
         }
-        nvs_close(my_handle);
     } else {
-        printf("[C System] Failed to open NVS namespace 'storage' (err=%d). Using default config key.\n", nvs_err);
+        printf("[C System] Skipping NVS key restore because NVS init failed.\n");
     }
 
     // Launch the core Zig-native application thread
@@ -550,6 +634,13 @@ void app_main(void) {
         CONFIG_VEHICLE_VIN,
         CONFIG_BLE_MAC_ADDRESS,
         api_key_to_use,
-        CONFIG_VEHICLE_PUBLIC_KEY
+        CONFIG_VEHICLE_PUBLIC_KEY,
+        saved_vcsec_session ? saved_vcsec_session : (const unsigned char *)"",
+        saved_vcsec_session_len,
+        saved_infotainment_session ? saved_infotainment_session : (const unsigned char *)"",
+        saved_infotainment_session_len
     );
+
+    free(saved_vcsec_session);
+    free(saved_infotainment_session);
 }

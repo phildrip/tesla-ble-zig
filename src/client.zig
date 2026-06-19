@@ -92,8 +92,8 @@ pub const Client = struct {
         random.bytes(&uuid);
         try writer.writeLengthDelimited(51, &uuid);
 
-        // 5. flags (field 52) - requests encrypted response (1 << FLAG_ENCRYPT_RESPONSE) = 2
-        try writer.writeUint32(52, 2);
+        // 5. flags (field 52) - requests encrypted response
+        try writer.writeUint32(52, 1);
 
         const payload_len = writer.pos;
         return try insertLength(payload_len, output);
@@ -146,6 +146,53 @@ pub const Client = struct {
         );
     }
 
+    /// Build a signed and encrypted infotainment command to flash the vehicle lights.
+    pub fn buildFlashLightsMessage(
+        self: *Client,
+        random: std.Random,
+        current_timestamp: u32,
+        output: []u8,
+    ) !usize {
+        var payload_buf: [32]u8 = undefined;
+        var writer = protobuf.Writer.init(&payload_buf);
+        try protobuf.CarServerAction.encodeVehicleAction(26, &writer);
+        const payload_slice = payload_buf[0..writer.pos];
+
+        return try self.buildUniversalMessageWithPayload(
+            random,
+            current_timestamp,
+            payload_slice,
+            .infotainment,
+            true,
+            output,
+        );
+    }
+
+    /// Build the raw VCSEC present-key pairing payload used to whitelist this client's public key.
+    pub fn buildWhiteListMessage(
+        self: *Client,
+        role: protocol.KeyRole,
+        form_factor: protocol.KeyFormFactor,
+        output: []u8,
+    ) !usize {
+        if (output.len < 2) return error.BufferTooSmall;
+
+        var unsigned_buf: [128]u8 = undefined;
+        var unsigned_writer = protobuf.Writer.init(&unsigned_buf);
+        try protobuf.UnsignedMessage.encodeWhitelistOperation(
+            &self.key_pair.public_key,
+            role,
+            form_factor,
+            &unsigned_writer,
+        );
+
+        var writer = protobuf.Writer.init(output[2..]);
+        try protobuf.VcsecToVcsecMessage.encodePresentKey(unsigned_buf[0..unsigned_writer.pos], &writer);
+
+        const payload_len = writer.pos;
+        return try insertLength(payload_len, output);
+    }
+
     /// Build a completely framed, signed, and encrypted/unsigned universal command payload.
     pub fn buildUniversalMessageWithPayload(
         self: *Client,
@@ -167,7 +214,7 @@ pub const Client = struct {
         try protobuf.Destination.encodeRoutingAddress(&self.connection_id, 7, &writer);
 
         // 3. flags (field 52)
-        const flags: u32 = 2; // FLAG_ENCRYPT_RESPONSE
+        const flags: u32 = 1; // FLAG_ENCRYPT_RESPONSE
         try writer.writeUint32(52, flags);
 
         // 4. uuid (field 51)
@@ -274,17 +321,17 @@ pub const Client = struct {
 
             if (self.has_vehicle_public_key) {
                 var matches = false;
-                
+
                 // 1. Check if matches first 20 bytes of the uncompressed public key excluding the 0x04 prefix (X-coordinate prefix)
                 if (std.mem.eql(u8, key_id, self.vehicle_public_key[1..21])) {
                     matches = true;
                 }
-                
+
                 // 2. Check if matches first 20 bytes including the 0x04 prefix
                 if (!matches and std.mem.eql(u8, key_id, self.vehicle_public_key[0..20])) {
                     matches = true;
                 }
-                
+
                 // 3. Check if matches the 20-byte SHA-1 hash of the vehicle public key
                 var sha1_out: [20]u8 = undefined;
                 std.crypto.hash.Sha1.hash(&self.vehicle_public_key, &sha1_out, .{});
@@ -306,7 +353,7 @@ pub const Client = struct {
                 if (!matches and std.mem.eql(u8, key_id, self.key_pair.public_key[0..20])) {
                     matches = true;
                 }
-                
+
                 if (matches) {
                     std.log.info("[Client] Successfully matched public key ID (vehicle or client). Substituting full 65-byte vehicle public key.", .{});
                     resolved_pub_key = self.vehicle_public_key;
@@ -349,9 +396,8 @@ pub const Client = struct {
 
     pub fn handleBleDisconnected(self: *Client, current_timestamp: u32) void {
         self.csm.handleEvent(.ble_disconnected, current_timestamp);
-        // Reset/invalidate active session states upon physical BLE link loss
-        self.session_vcsec.is_valid = false;
-        self.session_infotainment.is_valid = false;
+        // SessionInfo is persisted by the vehicle and may survive BLE reconnects.
+        // Invalidate sessions only on protocol faults or explicit session failures.
     }
 
     pub fn handleConnectRequested(self: *Client, current_timestamp: u32) void {
@@ -448,7 +494,7 @@ test "Complete Client Handshake and Encrypted Communication Loop" {
     var resp_len: usize = 0;
     {
         var resp_writer = protobuf.Writer.init(&resp_buf);
-        
+
         // 1. to_destination
         try protobuf.Destination.encodeRoutingAddress(&conn_id, 6, &resp_writer);
 
@@ -513,4 +559,20 @@ test "Complete Client Handshake and Encrypted Communication Loop" {
     );
 
     try std.testing.expectEqualSlices(u8, response_text, decrypted_plaintext[0..decrypted_len]);
+}
+
+test "Client Whitelist message builder creates raw VCSEC present-key packet" {
+    const vin = "5YJ3E1EBXLF000000";
+    const conn_id = [_]u8{0x77} ** 16;
+    var client = try Client.init(vin, [_]u8{3} ** 32, conn_id);
+
+    var buffer: [256]u8 = undefined;
+    const len = try client.buildWhiteListMessage(.driver, .cloud_key, &buffer);
+    try std.testing.expectEqual(buffer[0], @as(u8, @intCast((len - 2) >> 8)));
+    try std.testing.expectEqual(buffer[1], @as(u8, @intCast((len - 2) & 0xFF)));
+    try std.testing.expectEqual(@as(u8, 0x0a), buffer[2]); // ToVCSECMessage.signedMessage.
+    try std.testing.expectEqual(@as(u8, 0x12), buffer[4]); // SignedMessage.protobufMessageAsBytes.
+    try std.testing.expectEqual(@as(u8, 0x82), buffer[6]); // UnsignedMessage.WhitelistOperation.
+    try std.testing.expectEqual(@as(u8, 0x18), buffer[len - 2]); // SignedMessage.signatureType.
+    try std.testing.expectEqual(@as(u8, 0x02), buffer[len - 1]); // PRESENT_KEY.
 }

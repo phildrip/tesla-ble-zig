@@ -29,6 +29,7 @@ var vehicle_public_key_str: [*:0]const u8 = undefined;
 pub var client_inst: client_module.Client = undefined;
 pub var queue_inst: queue_module.CommandQueue = undefined;
 pub var is_initialized: bool = false;
+var pending_pair_request: bool = false;
 
 fn parseHexKey(hex: []const u8, out: []u8) !void {
     if (hex.len != out.len * 2) return error.InvalidLength;
@@ -49,6 +50,17 @@ pub fn getMillis() u32 {
     }
 }
 
+/// Get system seconds for Tesla protocol timestamp deltas.
+fn getSeconds() u32 {
+    if (builtin.os.tag == .freestanding) {
+        return @intCast(@divTrunc(esp_timer_get_time(), 1_000_000));
+    } else {
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+        return @truncate(@as(u64, @intCast(ts.sec)));
+    }
+}
+
 // Pure-Zig global entry-point callable from ESP-IDF bootloader.
 pub export fn tesla_zig_app_main(
     ssid: [*:0]const u8,
@@ -60,6 +72,10 @@ pub export fn tesla_zig_app_main(
     ble_mac: [*:0]const u8,
     api_key: [*:0]const u8,
     vehicle_pub_key: [*:0]const u8,
+    saved_vcsec_session: [*]const u8,
+    saved_vcsec_session_len: usize,
+    saved_infotainment_session: [*]const u8,
+    saved_infotainment_session_len: usize,
 ) callconv(.c) void {
     std.log.info("🚗 Starting Pure-Zig Standalone Tesla BLE Firmware...", .{});
 
@@ -113,6 +129,9 @@ pub export fn tesla_zig_app_main(
         }
     }
 
+    loadSavedSessionInfo(.vehicle_security, saved_vcsec_session, saved_vcsec_session_len);
+    loadSavedSessionInfo(.infotainment, saved_infotainment_session, saved_infotainment_session_len);
+
     queue_inst = queue_module.CommandQueue.init();
     is_initialized = true;
 
@@ -130,6 +149,35 @@ pub export fn tesla_zig_app_main(
     } else {
         std.log.info("[Mock] Running in native test mode. Wi-Fi, MQTT, and BLE simulated.", .{});
     }
+}
+
+fn loadSavedSessionInfo(domain: @import("protocol.zig").Domain, session_ptr: [*]const u8, session_len: usize) void {
+    if (session_len == 0) {
+        std.log.warn("[System] No saved {any} SessionInfo provided from NVS.", .{domain});
+        return;
+    }
+
+    std.log.info("[System] Loading saved {any} SessionInfo from NVS ({d} bytes).", .{ domain, session_len });
+
+    const session_bytes = session_ptr[0..session_len];
+    const info = @import("protobuf.zig").SessionInfo.decode(session_bytes) catch |err| {
+        std.log.err("[System] Failed to decode saved {any} SessionInfo from NVS: {any}", .{ domain, err });
+        return;
+    };
+
+    if (domain == .vehicle_security and info.public_key_len == 65 and info.public_key[0] == 0x04) {
+        client_inst.setVehiclePublicKey(info.public_key);
+        std.log.info("[System] Restored full vehicle public key from saved {any} SessionInfo.", .{domain});
+    } else if (info.public_key_len != 65 or info.public_key[0] != 0x04) {
+        std.log.warn("[System] Saved {any} SessionInfo did not contain a full vehicle public key (len={d}).", .{ domain, info.public_key_len });
+    }
+
+    client_inst.handleSessionInfoResponse(domain, getSeconds(), session_bytes) catch |err| {
+        std.log.err("[System] Failed to restore saved {any} SessionInfo into Zig client: {any}", .{ domain, err });
+        return;
+    };
+
+    std.log.info("[System] Restored saved {any} secure session from NVS.", .{domain});
 }
 
 // -------------------------------------------------------------
@@ -210,7 +258,24 @@ fn publishHomeAssistantDiscovery() void {
 
     tesla_c_mqtt_publish(frunk_discovery_topic, frunk_discovery_payload.ptr, frunk_discovery_payload.len, 1, 1);
 
-    // 3. Charger State binary sensor discovery
+    // 3. Flash lights button discovery
+    const flash_discovery_topic = std.fmt.bufPrintZ(&topic_buf, "homeassistant/button/tesla_ble_{s}_flash_lights/config", .{vehicle_vin}) catch return;
+    const flash_discovery_payload = std.fmt.bufPrint(&payload_buf,
+        \\{{
+        \\"name":"Tesla Flash Lights",
+        \\"unique_id":"tesla_ble_{s}_flash_lights",
+        \\"command_topic":"tesla_ble/{s}/command/flash_lights",
+        \\"payload_press":"FLASH",
+        \\"device":{{
+        \\"identifiers":["tesla_ble_{s}"],
+        \\"name":"Tesla Model C6"
+        \\}}
+        \\}}
+    , .{ vehicle_vin, vehicle_vin, vehicle_vin }) catch return;
+
+    tesla_c_mqtt_publish(flash_discovery_topic, flash_discovery_payload.ptr, flash_discovery_payload.len, 1, 1);
+
+    // 4. Charger State binary sensor discovery
     const charger_discovery_topic = std.fmt.bufPrintZ(&topic_buf, "homeassistant/binary_sensor/tesla_ble_{s}_charging/config", .{vehicle_vin}) catch return;
     const charger_discovery_payload = std.fmt.bufPrint(&payload_buf,
         \\{{
@@ -228,7 +293,7 @@ fn publishHomeAssistantDiscovery() void {
 
     tesla_c_mqtt_publish(charger_discovery_topic, charger_discovery_payload.ptr, charger_discovery_payload.len, 1, 1);
 
-    std.log.info("[HA Discovery] Successfully registered switch.tesla_ble_lock, button.tesla_ble_frunk, and binary_sensor.tesla_ble_charging", .{});
+    std.log.info("[HA Discovery] Successfully registered lock, frunk, flash lights, and charging entities", .{});
 }
 
 // Handle inbound control messages from Home Assistant.
@@ -254,6 +319,24 @@ fn handleIncomingCommand(topic: []const u8, payload: []const u8) void {
                 std.log.err("Queue full: {any}", .{err});
             };
         }
+    } else if (std.mem.endsWith(u8, topic, "command/flash_lights")) {
+        if (std.mem.eql(u8, payload, "FLASH")) {
+            std.log.info("[Command] Enqueueing flash lights command", .{});
+            _ = queue_inst.pushBack(3, 26, getMillis()) catch |err| {
+                std.log.err("Queue full: {any}", .{err});
+            };
+        }
+    } else if (std.mem.endsWith(u8, topic, "command/pair")) {
+        if (std.mem.eql(u8, payload, "PAIR")) {
+            std.log.info("[Command] Pairing requested; preparing whitelist message", .{});
+            pending_pair_request = true;
+            if (client_inst.csm.state == .disconnected) {
+                std.log.info("CSM disconnected. Initiating BLE scanning for pairing...", .{});
+                nimble_layer.startScanning();
+            } else {
+                sendPairingRequest();
+            }
+        }
     }
 
     // Process the queue!
@@ -267,17 +350,48 @@ pub fn sendHandshakeRequest(domain: @import("protocol.zig").Domain) void {
     const r = @import("c_bindings.zig").TeslaRandom.random();
 
     const len = client_inst.buildSessionInfoRequestMessage(r, domain, &buffer) catch |err| {
-        std.log.err("Failed to build SessionInfoRequest for domain {any}: {any}", .{domain, err});
+        std.log.err("Failed to build SessionInfoRequest for domain {any}: {any}", .{ domain, err });
         return;
     };
 
-    std.log.info("Sending SessionInfoRequest ({d} bytes) for domain {any}...", .{len, domain});
+    std.log.info("Sending SessionInfoRequest ({d} bytes) for domain {any}...", .{ len, domain });
     nimble_layer.writeTxCharacteristic(buffer[0..len]);
+}
+
+pub fn handleBleChannelReady() void {
+    if (!is_initialized) return;
+
+    if (pending_pair_request) {
+        sendPairingRequest();
+    } else if (client_inst.session_vcsec.is_valid) {
+        std.log.info("[System] Using restored VCSEC session; skipping SessionInfoRequest.", .{});
+        client_inst.csm.handleEvent(.handshake_success_vcsec, getMillis());
+        processQueue();
+    } else {
+        sendHandshakeRequest(.vehicle_security);
+    }
+}
+
+pub fn sendPairingRequest() void {
+    if (!is_initialized) return;
+
+    var buffer: [256]u8 = undefined;
+    const len = client_inst.buildWhiteListMessage(.driver, .cloud_key, &buffer) catch |err| {
+        std.log.err("Failed to build whitelist pairing message: {any}", .{err});
+        return;
+    };
+
+    pending_pair_request = false;
+    std.log.info("Sending VCSEC whitelist pairing message ({d} bytes)...", .{len});
+    nimble_layer.writeTxCharacteristic(buffer[0..len]);
+    std.log.info("Please tap your Tesla key card on the reader now.", .{});
 }
 
 var rx_reassembly_buf: [512]u8 = undefined;
 var rx_reassembly_len: usize = 0;
 var rx_expected_len: usize = 0;
+var tx_command_buf: [512]u8 = undefined;
+var processing_queue = false;
 
 pub fn handleRxNotification(payload: []const u8) void {
     if (!is_initialized) return;
@@ -306,7 +420,7 @@ pub fn handleRxNotification(payload: []const u8) void {
     @memcpy(rx_reassembly_buf[rx_reassembly_len .. rx_reassembly_len + payload.len], payload);
     rx_reassembly_len += payload.len;
 
-    std.log.info("[Firmware] Reassembly progress: {d}/{d} bytes", .{rx_reassembly_len, rx_expected_len});
+    std.log.info("[Firmware] Reassembly progress: {d}/{d} bytes", .{ rx_reassembly_len, rx_expected_len });
 
     // Check if we have gathered the entire packet
     if (rx_reassembly_len >= rx_expected_len) {
@@ -327,7 +441,7 @@ fn processFullRxMessage(payload: []const u8) void {
     const msg_len = (@as(usize, payload[0]) << 8) | payload[1];
     if (payload.len < msg_len + 2) return;
 
-    const msg_bytes = payload[2..msg_len + 2];
+    const msg_bytes = payload[2 .. msg_len + 2];
 
     const decoded = @import("protobuf.zig").DecodedRoutableMessage.decode(msg_bytes) catch |err| {
         std.log.err("Failed to decode RoutableMessage: {any}", .{err});
@@ -336,36 +450,81 @@ fn processFullRxMessage(payload: []const u8) void {
 
     if (decoded.session_info) |si_bytes| {
         std.log.info("Received SessionInfo response!", .{});
-        const domain = decoded.to_destination_domain orelse .vehicle_security;
-        client_inst.handleSessionInfoResponse(domain, getMillis(), si_bytes) catch |err| {
+        if (decoded.signed_message_fault != 0) {
+            std.log.warn("SessionInfo response included signed message fault={d}", .{decoded.signed_message_fault});
+        }
+        const domain = decoded.from_destination_domain orelse decoded.to_destination_domain orelse .vehicle_security;
+        if (client_inst.getPeer(domain)) |active_sess| {
+            if (active_sess.is_valid and processing_queue) {
+                std.log.info("Ignoring duplicate SessionInfo for already-valid domain {any}.", .{domain});
+                processQueue();
+                return;
+            }
+        }
+
+        client_inst.handleSessionInfoResponse(domain, getSeconds(), si_bytes) catch |err| {
             std.log.err("Failed to handle SessionInfoResponse: {any}", .{err});
             return;
         };
 
-        std.log.info("Session for domain {any} initialized successfully! CSM State: {any}", .{domain, client_inst.csm.state});
+        std.log.info("Session for domain {any} initialized successfully! CSM State: {any}", .{ domain, client_inst.csm.state });
 
         // Publish lock state to Home Assistant on successful handshake (default to UNLOCKED)
         publishStateUpdate("state/lock", "UNLOCKED");
 
         processQueue();
     } else {
+        if (decoded.protobuf_message_as_bytes) |vcsec_bytes| {
+            if (decoded.aes_gcm_response_sig == null) {
+                const vcsec_msg = @import("protobuf.zig").DecodedVcsecMessage.decode(vcsec_bytes) catch |err| {
+                    std.log.err("Failed to decode plaintext VCSEC response: {any}", .{err});
+                    return;
+                };
+
+                if (vcsec_msg.command_status) |status| {
+                    std.log.info("Received VCSEC command status: operation_status={d}", .{status.operation_status});
+                    if (status.whitelist_operation_status) |whitelist_status| {
+                        std.log.info(
+                            "Whitelist status: operation_status={d}, information={d}",
+                            .{ whitelist_status.operation_status, whitelist_status.information },
+                        );
+                    }
+                    return;
+                }
+
+                if (vcsec_msg.has_whitelist_info) {
+                    std.log.info("Received VCSEC whitelist info response.", .{});
+                    return;
+                }
+                if (vcsec_msg.has_whitelist_entry_info) {
+                    std.log.info("Received VCSEC whitelist entry info response.", .{});
+                    return;
+                }
+            }
+        }
+
         var plaintext_buf: [512]u8 = undefined;
+        const domain = decoded.from_destination_domain orelse decoded.to_destination_domain orelse .vehicle_security;
         const decrypted_len = client_inst.decryptResponse(
-            .vehicle_security,
+            domain,
             decoded,
             &plaintext_buf,
         ) catch |err| {
-            std.log.err("Failed to decrypt vehicle response: {any}", .{err});
+            std.log.err("Failed to decrypt {any} vehicle response: {any}", .{ domain, err });
             return;
         };
 
-        const plaintext = plaintext_buf[0..decrypted_len];
-        std.log.info("Successfully decrypted response ({d} bytes): {s}", .{decrypted_len, plaintext});
+        std.log.info("Successfully decrypted {any} response ({d} bytes)", .{ domain, decrypted_len });
     }
 }
 
 pub fn processQueue() void {
     if (!is_initialized) return;
+    if (processing_queue) {
+        return;
+    }
+    processing_queue = true;
+    defer processing_queue = false;
 
     if (queue_inst.empty()) {
         return;
@@ -383,32 +542,44 @@ pub fn processQueue() void {
     }
 
     const cmd = queue_inst.getFront().?;
-    std.log.info("Processing command ID {d}: domain={d}, action={d}", .{cmd.id, cmd.domain, cmd.action});
+    std.log.info("Processing command ID {d}: domain={d}, action={d}", .{ cmd.id, cmd.domain, cmd.action });
 
-    var buffer: [512]u8 = undefined;
+    if (cmd.domain == 3 and !client_inst.session_infotainment.is_valid) {
+        std.log.info("Infotainment session not ready; requesting SessionInfo before command", .{});
+        sendHandshakeRequest(.infotainment);
+        return;
+    }
+
     const r = @import("c_bindings.zig").TeslaRandom.random();
     var len: usize = 0;
 
     if (cmd.action == 1) {
-        len = client_inst.buildRkeActionMessage(r, getMillis(), 1, &buffer) catch |err| {
+        len = client_inst.buildRkeActionMessage(r, getSeconds(), 1, &tx_command_buf) catch |err| {
             std.log.err("Failed to build Lock message: {any}", .{err});
             return;
         };
     } else if (cmd.action == 0) {
-        len = client_inst.buildRkeActionMessage(r, getMillis(), 0, &buffer) catch |err| {
+        len = client_inst.buildRkeActionMessage(r, getSeconds(), 0, &tx_command_buf) catch |err| {
             std.log.err("Failed to build Unlock message: {any}", .{err});
             return;
         };
     } else if (cmd.action == 30) {
-        len = client_inst.buildRkeActionMessage(r, getMillis(), 30, &buffer) catch |err| {
+        len = client_inst.buildRkeActionMessage(r, getSeconds(), 30, &tx_command_buf) catch |err| {
             std.log.err("Failed to build Wake message: {any}", .{err});
             return;
         };
     } else if (cmd.action == 31) {
-        len = client_inst.buildClosureMoveRequestMessage(r, getMillis(), 0, 1, &buffer) catch |err| {
+        len = client_inst.buildClosureMoveRequestMessage(r, getSeconds(), 0, 1, &tx_command_buf) catch |err| {
             std.log.err("Failed to build Frunk message: {any}", .{err});
             return;
         };
+    } else if (cmd.domain == 3 and cmd.action == 26) {
+        std.log.info("Building Flash Lights infotainment message...", .{});
+        len = client_inst.buildFlashLightsMessage(r, getSeconds(), &tx_command_buf) catch |err| {
+            std.log.err("Failed to build Flash Lights message: {any}", .{err});
+            return;
+        };
+        std.log.info("Built Flash Lights message ({d} bytes).", .{len});
     } else {
         std.log.err("Unknown action {d}", .{cmd.action});
         queue_inst.popFront();
@@ -416,7 +587,7 @@ pub fn processQueue() void {
     }
 
     std.log.info("Sending secure command BLE packet ({d} bytes)...", .{len});
-    nimble_layer.writeTxCharacteristic(buffer[0..len]);
+    nimble_layer.writeTxCharacteristic(tx_command_buf[0..len]);
 
     cmd.state = .waiting_for_response;
     queue_inst.popFront();
@@ -430,6 +601,6 @@ pub fn processQueue() void {
 
 fn publishStateUpdate(subtopic: []const u8, payload: []const u8) void {
     var topic_buf: [256]u8 = undefined;
-    const topic = std.fmt.bufPrintZ(&topic_buf, "tesla_ble/{s}/{s}", .{vehicle_vin, subtopic}) catch return;
+    const topic = std.fmt.bufPrintZ(&topic_buf, "tesla_ble/{s}/{s}", .{ vehicle_vin, subtopic }) catch return;
     tesla_c_mqtt_publish(topic, payload.ptr, payload.len, 1, 1);
 }
